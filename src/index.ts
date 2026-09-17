@@ -8,7 +8,7 @@ import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { Archive } from "./archive.ts";
 import { type RecordedEvent, RunRecorder } from "./recorder.ts";
 import { RunStore } from "./store.ts";
-import { Summaries } from "./summary.ts";
+import { parseOverviewLimit, Summaries } from "./summary.ts";
 import { registerTools } from "./tools.ts";
 import { registerCommands } from "./ui.ts";
 
@@ -20,6 +20,11 @@ export default function runArchive(pi: ExtensionAPI): void {
   pi.registerFlag("runs-no-summary", {
     type: "boolean",
     description: "Record Runs without background model summaries",
+  });
+  pi.registerFlag("runs-overview-limit", {
+    type: "string",
+    description:
+      "Overview character limit 1–2000 (PI_RUNS_OVERVIEW_LIMIT, default 200)",
   });
   let recorder: RunRecorder | undefined;
   let archive: Archive | undefined;
@@ -89,19 +94,38 @@ export default function runArchive(pi: ExtensionAPI): void {
           throw error;
         }
         archive = new Archive(store);
-        if (!pi.getFlag("runs-no-summary")) {
-          summaries = new Summaries(archive, (notice) => {
-            if (!uiContext?.hasUI || Number(notice.id.slice(1)) < latestNotice)
-              return;
-            latestNotice = Number(notice.id.slice(1));
-            uiContext.ui.setWidget(
-              "runs-summary",
-              [
-                `本轮摘要 · ${notice.id} · ${notice.state === "saved" ? "已保存" : notice.state === "pending" ? "生成中" : "未生成"}`,
-                stripTerminalSequences(notice.text),
-              ].map((line) => uiContext?.ui.theme.fg("muted", line) ?? line),
-            );
-          });
+        let overviewLimit: number | undefined;
+        try {
+          overviewLimit = parseOverviewLimit(
+            pi.getFlag("runs-overview-limit") ??
+              process.env.PI_RUNS_OVERVIEW_LIMIT,
+          );
+        } catch (error) {
+          ctx.ui.notify(
+            `runs-overview-limit 配置无效，本会话不生成概述：${String(error)}`,
+            "error",
+          );
+        }
+        if (!pi.getFlag("runs-no-summary") && overviewLimit !== undefined) {
+          summaries = new Summaries(
+            archive,
+            (notice) => {
+              if (
+                !uiContext?.hasUI ||
+                Number(notice.id.slice(1)) < latestNotice
+              )
+                return;
+              latestNotice = Number(notice.id.slice(1));
+              uiContext.ui.setWidget(
+                "runs-summary",
+                [
+                  `本轮摘要 · ${notice.id} · ${notice.state === "saved" ? "已保存" : notice.state === "pending" ? "生成中" : "未生成"}`,
+                  stripTerminalSequences(notice.text),
+                ].map((line) => uiContext?.ui.theme.fg("muted", line) ?? line),
+              );
+            },
+            { overviewLimit },
+          );
         }
       }
       const settled = event.type === "agent_settled" ? recorder.runId : null;

@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import {
+  parseOverviewLimit,
   providerSessionHeaders,
   summaryContext,
+  summaryPrompt,
   validateSummary,
 } from "../src/summary.ts";
 import { RunPanel } from "../src/ui.ts";
@@ -61,6 +63,22 @@ test("summary validator rejects incomplete, blank, oversized and tool-call respo
     validateSummary(assistant("stop", "🧪".repeat(200))),
     "🧪".repeat(200),
   );
+});
+
+test("overview limit is configurable: prompt, validation and parsing follow it", () => {
+  assert.match(summaryPrompt(500), /不超过500个Unicode字符/);
+  assert.equal(
+    validateSummary(assistant("stop", "中".repeat(500)), 500),
+    "中".repeat(500),
+  );
+  assert.throws(() =>
+    validateSummary(assistant("stop", "中".repeat(501)), 500),
+  );
+  assert.throws(() => validateSummary(assistant("stop", "中".repeat(10)), 5));
+  assert.equal(parseOverviewLimit(undefined), 200);
+  assert.equal(parseOverviewLimit("500"), 500);
+  for (const invalid of ["0", "abc", "2001", "1.5", true])
+    assert.throws(() => parseOverviewLimit(invalid));
 });
 
 test("provider error messages surface instead of the generic validator text", () => {

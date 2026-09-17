@@ -22,7 +22,7 @@ pi --no-extensions -e ./src/index.ts
 
 这次启动只加载 v2 扩展，不修改安装配置。正常对话即自动积累 Run；输入 `/runs` 查看当前目录的历史，选记录后逐层打开消息。默认库为 Pi agent 目录下的 `run-archive/runs.sqlite`（通常是 `~/.pi/agent/run-archive/runs.sqlite`），首次从空库开始，之后持续保留。
 
-试验库可通过 `--runs-db <路径>` 或 `PI_RUNS_DB` 指定，前者优先；`--runs-no-summary` 可关闭后台模型摘要。修改库路径或摘要开关后，重新启动 Pi。归档包含原始消息与工具数据，请按敏感资料保护。
+试验库可通过 `--runs-db <路径>` 或 `PI_RUNS_DB` 指定，前者优先；`--runs-no-summary` 可关闭后台模型摘要。概述长度上限默认 200 个 Unicode 字符，可用 `--runs-overview-limit <字符数>` 或 `PI_RUNS_OVERVIEW_LIMIT`（1–2000）调整；配置无效时不生成概述并在界面提示，录制不受影响。修改库路径或摘要开关后，重新启动 Pi。归档包含原始消息与工具数据，请按敏感资料保护。
 
 ## 查阅入口
 
