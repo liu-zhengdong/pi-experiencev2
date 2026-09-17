@@ -57,8 +57,8 @@ test("native tool cards show effective filters, exact supplied parameters and ex
     ],
     [
       "get_message_detail",
-      { id: "m1558", format: "raw" },
-      ['id="m1558"', 'format="raw"'],
+      { id: "r41/m2", format: "raw" },
+      ['id="r41/m2"', 'format="raw"'],
     ],
     [
       "delete_run",

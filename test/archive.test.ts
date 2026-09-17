@@ -4,6 +4,7 @@ import { readFileSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { Archive, type FindArgs } from "../src/archive.ts";
+import { integer, text } from "../src/data.ts";
 import { RunRecorder } from "../src/recorder.ts";
 import { RunStore } from "../src/store.ts";
 import { assistant, finishRun, recording, workspace } from "./helpers.ts";
@@ -46,7 +47,7 @@ test("archive search covers summaries, full text, metadata and exact time/direct
     0,
   );
   const hit = await f.archive.find({ query: "SQLITE", scope: "content" });
-  assert.match(hit.text, /命中 m\d+/);
+  assert.match(hit.text, /命中 r1\/m2 · /);
   assert.equal(f.archive.getRun("r1").id, id);
   assert.match(
     (await f.archive.find({ id: "r1" })).text,
@@ -160,9 +161,12 @@ test("message detail pagination is lossless for emoji, text, reasoning, tool JSO
   const messages = await f.archive.find({ id });
   const ref = messages.choices[0]?.id;
   assert.ok(ref);
+  assert.equal(ref, "r1/m1");
   const expectedRaw = f.store.db
-    .prepare("SELECT payload FROM messages WHERE first_seq=?")
-    .get(Number(ref.slice(1)))?.payload;
+    .prepare(
+      "SELECT payload FROM messages WHERE run_id=? ORDER BY first_seq LIMIT 1",
+    )
+    .get(id)?.payload;
   for (const format of ["text", "raw"] as const) {
     let args:
       | { id: string; format: "text" | "raw"; cursor?: string }
@@ -194,6 +198,43 @@ test("message detail pagination is lossless for emoji, text, reasoning, tool JSO
     () => f.archive.detail({ ...page.next, id: ref, format: "raw" }),
     /cursor/,
   );
+});
+
+test("message refs are run-scoped and reset per run; legacy global refs and UUIDs still resolve", async (t) => {
+  const f = recording(t);
+  const one = finishRun(f.recorder, "第一轮", assistant("stop", "第一轮回答"));
+  const two = finishRun(f.recorder, "第二轮", assistant("stop", "第二轮回答"));
+  assert.deepEqual(
+    (await f.archive.find({ id: one })).choices.map((c) => c.id),
+    ["r1/m1", "r1/m2"],
+  );
+  assert.deepEqual(
+    (await f.archive.find({ id: two })).choices.map((c) => c.id),
+    ["r2/m1", "r2/m2"],
+  );
+  assert.match(
+    (await f.archive.find({ query: "第二轮回答", scope: "content" })).text,
+    /命中 r2\/m2 · /,
+  );
+  // Same position in different Runs resolves to that Run's own message.
+  assert.match(f.archive.detail({ id: "r1/m2" }).text, /第一轮回答/);
+  assert.match(f.archive.detail({ id: "r2/m2" }).text, /第二轮回答/);
+  // Legacy global m-number and UUID resolve to the same message body.
+  const stored = f.store.db
+    .prepare(
+      "SELECT id, first_seq FROM messages WHERE run_id=? ORDER BY first_seq LIMIT 1 OFFSET 1",
+    )
+    .get(one);
+  assert.ok(stored);
+  const body = (page: string) => page.slice(page.indexOf("\n---\n"));
+  assert.equal(
+    body(f.archive.detail({ id: `m${integer(stored, "first_seq")}` }).text),
+    body(f.archive.detail({ id: "r1/m2" }).text),
+  );
+  assert.match(f.archive.detail({ id: text(stored, "id") }).text, /第一轮回答/);
+  // Out-of-range positions, unknown Runs and malformed refs are rejected.
+  for (const id of ["r1/m3", "r9/m1", "r1/m0", "r0/m1", "m0"])
+    assert.throws(() => f.archive.detail({ id }), /not found/i, id);
 });
 
 test("deletion is atomic, idempotent and bounded; neither live Runs nor unknown IDs can be mixed into a batch", async (t) => {

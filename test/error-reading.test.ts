@@ -126,7 +126,7 @@ test("fresh real SDK tool calls find and read an empty model failure", async (t)
   assert.ok(found && found.role === "toolResult");
   assert.equal(found.isError, false);
   const output = JSON.stringify(found.content);
-  detailId = /命中 (m\d+)/.exec(output)?.[1] ?? "";
+  detailId = /命中 (r\d+\/m\d+)/.exec(output)?.[1] ?? "";
   assert.ok(detailId, output);
   assert.match(output, /fetch failed/);
   phase = "detail";

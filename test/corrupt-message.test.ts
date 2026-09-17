@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { text } from "../src/data.ts";
 import { finishRun, recording } from "./helpers.ts";
 
 test("corrupt message data fails explicitly with its ID; raw bytes remain readable", async (t) => {
@@ -7,6 +8,11 @@ test("corrupt message data fails explicitly with its ID; raw bytes remain readab
   finishRun(f.recorder);
   const ref = (await f.archive.find({ id: "r1" })).choices[0]?.id;
   assert.ok(ref);
+  const row = f.store.db
+    .prepare("SELECT id FROM messages ORDER BY first_seq LIMIT 1")
+    .get();
+  assert.ok(row);
+  const messageId = text(row, "id");
   f.store.db.exec("PRAGMA ignore_check_constraints = ON");
   for (const payload of [
     "{broken JSON",
@@ -14,8 +20,8 @@ test("corrupt message data fails explicitly with its ID; raw bytes remain readab
     '{"content":"missing role"}',
   ]) {
     f.store.db
-      .prepare("UPDATE messages SET payload=? WHERE first_seq=?")
-      .run(payload, Number(ref.slice(1)));
+      .prepare("UPDATE messages SET payload=? WHERE id=?")
+      .run(payload, messageId);
     const error = new RegExp(`Invalid archived message ${ref}`);
     await assert.rejects(
       f.archive.find({ query: "missing", scope: "content" }),
