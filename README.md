@@ -22,7 +22,15 @@ pi --no-extensions -e ./src/index.ts
 
 这次启动只加载 v2 扩展，不修改安装配置。正常对话即自动积累 Run；输入 `/runs` 查看当前目录的历史，选记录后逐层打开消息。默认库为 Pi agent 目录下的 `run-archive/runs.sqlite`（通常是 `~/.pi/agent/run-archive/runs.sqlite`），首次从空库开始，之后持续保留。
 
-试验库可通过 `--runs-db <路径>` 或 `PI_RUNS_DB` 指定，前者优先；`--runs-no-summary` 可关闭后台模型摘要。修改库路径或摘要开关后，重新启动 Pi。归档包含原始消息与工具数据，请按敏感资料保护。
+试验库可通过 `--runs-db <路径>` 或 `PI_RUNS_DB` 指定；`--runs-no-summary` 可关闭后台模型摘要；概述长度上限默认 200 个 Unicode 字符，可用 `--runs-overview-limit <字符数>` 或 `PI_RUNS_OVERVIEW_LIMIT`（1–2000）调整。配置值是提示模型的目标长度，校验时额外放宽 50%（默认 200 时实际最多接受 300），模型略超目标不判失败。
+
+持久配置可写入 Pi agent 目录下的 `pi-experiencev2.json`（通常是 `~/.pi/agent/pi-experiencev2.json`）：
+
+```json
+{ "db": "/path/to/runs.sqlite", "noSummary": false, "overviewLimit": 500 }
+```
+
+三个键都可省略；同一配置的优先级为 CLI 参数 > 环境变量 > 配置文件 > 默认值。配置文件无效（不是 JSON 对象、键类型错误等）会整个忽略并在界面提示，录制不受影响。概述上限只影响之后生成的概述；概述上限配置无效时不生成概述并提示，录制同样不受影响。修改配置后重新启动 Pi 生效。归档包含原始消息与工具数据，请按敏感资料保护。
 
 ## 查阅入口
 

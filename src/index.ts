@@ -6,9 +6,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { Archive } from "./archive.ts";
+import { loadConfig } from "./config.ts";
 import { type RecordedEvent, RunRecorder } from "./recorder.ts";
 import { RunStore } from "./store.ts";
-import { Summaries } from "./summary.ts";
+import { parseOverviewLimit, Summaries } from "./summary.ts";
 import { registerTools } from "./tools.ts";
 import { registerCommands } from "./ui.ts";
 
@@ -20,6 +21,11 @@ export default function runArchive(pi: ExtensionAPI): void {
   pi.registerFlag("runs-no-summary", {
     type: "boolean",
     description: "Record Runs without background model summaries",
+  });
+  pi.registerFlag("runs-overview-limit", {
+    type: "string",
+    description:
+      "Overview character limit 1–2000 (PI_RUNS_OVERVIEW_LIMIT, default 200)",
   });
   let recorder: RunRecorder | undefined;
   let archive: Archive | undefined;
@@ -70,7 +76,17 @@ export default function runArchive(pi: ExtensionAPI): void {
     uiContext = ctx;
     try {
       if (!recorder) {
-        const selected = pi.getFlag("runs-db") ?? process.env.PI_RUNS_DB;
+        let config: ReturnType<typeof loadConfig> = {};
+        try {
+          config = loadConfig(getAgentDir());
+        } catch (error) {
+          ctx.ui.notify(
+            `pi-experiencev2 配置文件无效，已忽略：${String(error)}`,
+            "error",
+          );
+        }
+        const selected =
+          pi.getFlag("runs-db") ?? process.env.PI_RUNS_DB ?? config.db;
         const path =
           typeof selected === "string" && selected.trim()
             ? resolve(ctx.cwd, selected)
@@ -89,19 +105,41 @@ export default function runArchive(pi: ExtensionAPI): void {
           throw error;
         }
         archive = new Archive(store);
-        if (!pi.getFlag("runs-no-summary")) {
-          summaries = new Summaries(archive, (notice) => {
-            if (!uiContext?.hasUI || Number(notice.id.slice(1)) < latestNotice)
-              return;
-            latestNotice = Number(notice.id.slice(1));
-            uiContext.ui.setWidget(
-              "runs-summary",
-              [
-                `本轮摘要 · ${notice.id} · ${notice.state === "saved" ? "已保存" : notice.state === "pending" ? "生成中" : "未生成"}`,
-                stripTerminalSequences(notice.text),
-              ].map((line) => uiContext?.ui.theme.fg("muted", line) ?? line),
-            );
-          });
+        const noSummary =
+          pi.getFlag("runs-no-summary") === true || config.noSummary === true;
+        let overviewLimit: number | undefined;
+        try {
+          overviewLimit = parseOverviewLimit(
+            pi.getFlag("runs-overview-limit") ??
+              process.env.PI_RUNS_OVERVIEW_LIMIT ??
+              config.overviewLimit,
+          );
+        } catch (error) {
+          ctx.ui.notify(
+            `runs-overview-limit 配置无效，本会话不生成概述：${String(error)}`,
+            "error",
+          );
+        }
+        if (!noSummary && overviewLimit !== undefined) {
+          summaries = new Summaries(
+            archive,
+            (notice) => {
+              if (
+                !uiContext?.hasUI ||
+                Number(notice.id.slice(1)) < latestNotice
+              )
+                return;
+              latestNotice = Number(notice.id.slice(1));
+              uiContext.ui.setWidget(
+                "runs-summary",
+                [
+                  `本轮摘要 · ${notice.id} · ${notice.state === "saved" ? "已保存" : notice.state === "pending" ? "生成中" : "未生成"}`,
+                  stripTerminalSequences(notice.text),
+                ].map((line) => uiContext?.ui.theme.fg("muted", line) ?? line),
+              );
+            },
+            { overviewLimit },
+          );
         }
       }
       const settled = event.type === "agent_settled" ? recorder.runId : null;
