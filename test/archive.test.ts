@@ -1,0 +1,311 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
+import { test } from "node:test";
+import { Archive, type FindArgs } from "../src/archive.ts";
+import { RunRecorder } from "../src/recorder.ts";
+import { RunStore } from "../src/store.ts";
+import { assistant, finishRun, recording, workspace } from "./helpers.ts";
+
+test("archive search covers summaries, full text, metadata and exact time/directory filters", async (t) => {
+  const f = recording(t);
+  const id = finishRun(
+    f.recorder,
+    "实现数据库索引",
+    assistant("stop", "修好SQLITE外键，确认等待处理。"),
+  );
+  f.store.db
+    .prepare(
+      "UPDATE runs SET overview='补上归档外键索引', started_at='2026-09-15T01:00:00.000Z' WHERE id=?",
+    )
+    .run(id);
+  for (const query of ["归档 索引", "SQLITE 确认", "数据库", "实现"])
+    assert.equal((await f.archive.find({ query })).choices.length, 1);
+  assert.equal(
+    (await f.archive.find({ query: "SQLITE", scope: "summary" })).choices
+      .length,
+    0,
+  );
+  assert.equal(
+    (await f.archive.find({ cwd: `${f.directory}/other` })).choices.length,
+    0,
+  );
+  assert.equal(
+    (
+      await f.archive.find({
+        cwd: f.directory,
+        since: "2026-09-15T09:00:00+08:00",
+        until: "2026-09-15T01:00:01Z",
+      })
+    ).choices.length,
+    1,
+  );
+  assert.equal(
+    (await f.archive.find({ until: "2026-09-15T01:00:00Z" })).choices.length,
+    0,
+  );
+  const hit = await f.archive.find({ query: "SQLITE", scope: "content" });
+  assert.match(hit.text, /命中 m\d+/);
+  assert.equal(f.archive.getRun("r1").id, id);
+  assert.match(
+    (await f.archive.find({ id: "r1" })).text,
+    /user[\s\S]*assistant/,
+  );
+  assert.deepEqual(f.store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  assert.equal(statSync(f.path).mode & 0o777, 0o600);
+});
+
+test("search rejects misleading matches in attachments, reasoning, tool args and across text blocks", async (t) => {
+  const f = recording(t);
+  finishRun(f.recorder, "source", {
+    ...assistant(),
+    content: [
+      { type: "text", text: "first" },
+      { type: "text", text: "second" },
+      { type: "thinking", thinking: "hidden-needle" },
+      {
+        type: "toolCall",
+        id: "c",
+        name: "read",
+        arguments: { path: "args-needle" },
+      },
+    ],
+  });
+  // Add an image to the user message through the recorder in another Run.
+  f.recorder.capture({ type: "agent_start" });
+  const message = {
+    role: "user" as const,
+    timestamp: 1,
+    content: [
+      {
+        type: "image" as const,
+        data: "attachment-needle",
+        mimeType: "image/png",
+      },
+    ],
+  };
+  f.recorder.capture({ type: "message_end", message });
+  f.recorder.capture({ type: "message_end", message: assistant() });
+  f.recorder.capture({ type: "agent_settled" });
+  for (const query of [
+    "hidden-needle",
+    "attachment-needle",
+    "args-needle",
+    "first second",
+  ])
+    assert.equal(
+      (await f.archive.find({ query, scope: "content" })).choices.length,
+      0,
+      query,
+    );
+  for (const args of [
+    { scope: "content", query: " " },
+    { since: "yesterday" },
+    { since: "2026-02-31T00:00:00Z" },
+    { since: "2026-09-15T01:00:00Z", until: "2026-09-15T00:00:00Z" },
+    { limit: 0 },
+    { limit: 51 },
+    { id: "r1", query: "first" },
+  ])
+    await assert.rejects(f.archive.find(args as FindArgs));
+});
+
+test("all pages preserve order; forged, changed-query and restart cursors are rejected", async (t) => {
+  const f = recording(t);
+  for (let i = 0; i < 7; i++) finishRun(f.recorder, `work ${i}`);
+  let args: FindArgs | undefined = { limit: 2 };
+  const found: string[] = [];
+  const initial = await f.archive.find(args);
+  assert.ok(initial.next);
+  while (args) {
+    const page = await f.archive.find(args);
+    found.push(...page.choices.map((c) => c.id));
+    args = page.next;
+  }
+  assert.deepEqual(found, ["r7", "r6", "r5", "r4", "r3", "r2", "r1"]);
+  await assert.rejects(
+    f.archive.find({ ...initial.next, query: "changed" }),
+    /cursor/,
+  );
+  await assert.rejects(
+    f.archive.find({ ...initial.next, cursor: `${initial.next.cursor}bad` }),
+    /cursor/,
+  );
+  await assert.rejects(new Archive(f.store).find(initial.next), /cursor/);
+  const first = await f.archive.find({ id: "r1", limit: 1 });
+  assert.ok(first.next);
+  const second = await f.archive.find(first.next);
+  assert.match(first.text, /user/);
+  assert.match(second.text, /assistant/);
+  assert.equal(second.next, undefined);
+  f.recorder.capture({ type: "agent_start" });
+  assert.equal(
+    (await f.archive.find()).choices.length,
+    7,
+    "active Run is not listed",
+  );
+});
+
+test("message detail pagination is lossless for emoji, text, reasoning, tool JSON and raw attachments", async (t) => {
+  const f = recording(t),
+    source = "🧪中文\n".repeat(10_000);
+  const id = finishRun(f.recorder, source, {
+    ...assistant(),
+    content: [
+      { type: "thinking", thinking: "思考详情" },
+      { type: "text", text: "最终回答" },
+    ],
+  });
+  const messages = await f.archive.find({ id });
+  const ref = messages.choices[0]?.id;
+  assert.ok(ref);
+  const expectedRaw = f.store.db
+    .prepare("SELECT payload FROM messages WHERE first_seq=?")
+    .get(Number(ref.slice(1)))?.payload;
+  for (const format of ["text", "raw"] as const) {
+    let args:
+      | { id: string; format: "text" | "raw"; cursor?: string }
+      | undefined = { id: ref, format };
+    let output = "",
+      count = 0;
+    while (args) {
+      const page = f.archive.detail(args);
+      const body = page.text.slice(
+        page.text.indexOf("\n---\n") + 5,
+        page.text.lastIndexOf("\n---\n"),
+      );
+      assert.ok(Buffer.byteLength(body) <= 12_000);
+      assert.ok(!/[\uD800-\uDBFF]$/u.test(body));
+      output += body;
+      args = page.next as typeof args;
+      count++;
+    }
+    assert.ok(count > 2);
+    assert.equal(output, format === "raw" ? expectedRaw : source);
+  }
+  assert.match(
+    f.archive.detail({ id: messages.choices[1]?.id ?? "" }).text,
+    /思考详情[\s\S]*最终回答/,
+  );
+  const page = f.archive.detail({ id: ref });
+  assert.ok(page.next);
+  assert.throws(
+    () => f.archive.detail({ ...page.next, id: ref, format: "raw" }),
+    /cursor/,
+  );
+});
+
+test("deletion is atomic, idempotent and bounded; neither live Runs nor unknown IDs can be mixed into a batch", async (t) => {
+  const f = recording(t),
+    one = finishRun(f.recorder),
+    two = finishRun(f.recorder);
+  f.recorder.capture({ type: "agent_start" });
+  const active = f.recorder.runId;
+  assert.ok(active);
+  const before = JSON.stringify(f.store.db.prepare("SELECT * FROM runs").all());
+  for (const ids of [[one, active], [one, "missing"], []])
+    assert.throws(() => f.archive.deleteRuns(ids, "用户要求清理测试"));
+  assert.throws(() => f.archive.deleteRuns([one], " "));
+  assert.equal(
+    JSON.stringify(f.store.db.prepare("SELECT * FROM runs").all()),
+    before,
+  );
+  const messageRef = (await f.archive.find({ id: one })).choices[0]?.id;
+  assert.ok(messageRef);
+  f.store.db.exec(
+    "CREATE TRIGGER fail_delete BEFORE DELETE ON runs WHEN OLD.ordinal=2 BEGIN SELECT RAISE(ABORT,'simulated delete failure'); END;",
+  );
+  assert.throws(
+    () => f.archive.deleteRuns([one, two], "用户授权"),
+    /simulated delete failure/,
+  );
+  assert.equal(
+    f.store.db
+      .prepare("SELECT count(*) AS n FROM messages WHERE run_id=?")
+      .get(one)?.n,
+    2,
+  );
+  f.store.db.exec("DROP TRIGGER fail_delete");
+  assert.deepEqual(f.archive.deleteRuns([one, "r1", two], "用户授权"), {
+    deleted: ["r1", "r2"],
+    alreadyDeleted: [],
+  });
+  assert.deepEqual(f.archive.deleteRuns([one, "r2"], "再次清理"), {
+    deleted: [],
+    alreadyDeleted: [one, "r2"],
+  });
+  assert.throws(() => f.archive.getRun(one), /已被删除/);
+  assert.throws(() => f.archive.detail({ id: messageRef }), /deleted/);
+  for (const table of ["messages", "events"])
+    assert.equal(
+      f.store.db
+        .prepare(`SELECT count(*) AS n FROM ${table} WHERE run_id IN (?,?)`)
+        .get(one, two)?.n,
+      0,
+    );
+  assert.deepEqual(f.store.db.prepare("PRAGMA foreign_key_check").all(), []);
+  f.recorder.capture({ type: "message_end", message: assistant() });
+  f.recorder.capture({ type: "agent_settled" });
+  const next = finishRun(f.recorder);
+  assert.equal(f.archive.getRun(next).ordinal, 4);
+});
+
+test("v1/foreign/future databases are rejected without changing bytes or journal mode", (t) => {
+  const f = workspace(t);
+  for (const version of [0, 5]) {
+    const path = `${f.path}.${version}`,
+      db = new DatabaseSync(path);
+    db.exec(
+      `CREATE TABLE experiences (body TEXT); INSERT INTO experiences VALUES ('old evidence'); PRAGMA user_version=${version};`,
+    );
+    db.close();
+    const hash = () =>
+      createHash("sha256").update(readFileSync(path)).digest("hex");
+    const before = hash();
+    assert.throws(() => new RunStore(path), /separate empty database/);
+    assert.equal(hash(), before);
+    const check = new DatabaseSync(path, { readOnly: true });
+    assert.equal(
+      check.prepare("PRAGMA journal_mode").get()?.journal_mode,
+      "delete",
+    );
+    check.close();
+  }
+});
+
+test("single-writer ownership and branch isolation apply to every kind of recorded outcome", (t) => {
+  const f = recording(t),
+    another = new RunStore(f.path);
+  f.cleanup(() => another.close());
+  assert.throws(
+    () =>
+      new RunRecorder(another, "pi", {
+        piSessionId: "test-session",
+        cwd: f.directory,
+        title: null,
+        reason: "resume",
+      }),
+    /live writer/,
+  );
+  for (const stop of ["stop", "error", "length", "aborted"] as const) {
+    const message = assistant(stop);
+    const id = finishRun(f.recorder, "test", message);
+    assert.equal(f.archive.getRun(id).recording, false);
+    assert.ok(f.archive.getRun(id).endedAt);
+    assert.deepEqual(
+      f.store.messages(f.sessionId, id).at(-1)?.payload,
+      message,
+    );
+  }
+  const before = f.recorder.binding.branchId;
+  f.recorder.capture({
+    type: "session_tree",
+    newLeafId: "old-tree-entry",
+    oldLeafId: "current",
+    fromExtension: false,
+  });
+  assert.notEqual(f.recorder.binding.branchId, before);
+  const id = finishRun(f.recorder);
+  assert.equal(f.archive.getRun(id).branchId, f.recorder.binding.branchId);
+});
