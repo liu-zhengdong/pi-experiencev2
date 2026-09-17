@@ -1,0 +1,58 @@
+{
+  "name": "pi-experiencev2",
+  "version": "0.1.0",
+  "description": "Run-only SQLite archive for pi, with on-demand search and message reading",
+  "type": "module",
+  "keywords": [
+    "pi-package"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "README-Evolution.md",
+    "docs"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/index.js"
+    ]
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/liu-zhengdong/pi-experiencev2.git"
+  },
+  "homepage": "https://github.com/liu-zhengdong/pi-experiencev2#readme",
+  "bugs": {
+    "url": "https://github.com/liu-zhengdong/pi-experiencev2/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "npm run build",
+    "test:package": "npm run build && node scripts/test-package.mjs",
+    "check": "npm run typecheck && npm test && npm run build && biome check ."
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.85.1",
+    "@earendil-works/pi-ai": ">=0.85.1",
+    "@earendil-works/pi-tui": ">=0.85.1"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-ai": "0.85.1",
+    "@earendil-works/pi-tui": "0.85.1",
+    "@biomejs/biome": "2.4.6",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.3"
+  }
+}

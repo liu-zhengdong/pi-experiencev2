@@ -1,0 +1,59 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+      - name: Verify release tag
+        run: node scripts/check-tag.mjs "$GITHUB_REF_NAME"
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm run check && npm run test:package
+      - name: Publish to npm with OIDC
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          tarball="$(find release -maxdepth 1 -name '*.tgz')"
+          if published_shasum="$(npm view "$name@$version" dist.shasum --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
+            local_shasum="$(sha1sum "$tarball" | awk '{print $1}')"
+            if [[ "$local_shasum" != "$published_shasum" ]]; then
+              echo "$name@$version already exists with a different tarball" >&2
+              exit 1
+            fi
+            echo "$name@$version already matches this tag; skipping publish"
+          else
+            npm publish "$tarball" --access public --provenance
+          fi
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          (cd release && sha256sum *.tgz > SHA256SUMS.txt)
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" release/*.tgz release/SHA256SUMS.txt --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" release/*.tgz release/SHA256SUMS.txt --generate-notes
+          fi

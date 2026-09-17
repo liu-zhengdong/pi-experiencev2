@@ -3,3 +3,7 @@ dist/
 *.sqlite
 *.sqlite-*
 .DS_Store
+release/
+*.tgz
+.evidence-path
+.pi/
