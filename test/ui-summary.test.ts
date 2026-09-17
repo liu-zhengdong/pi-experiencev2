@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { stripTerminalSequences, visibleWidth } from "@earendil-works/pi-tui";
 import {
+  overviewHardLimit,
   parseOverviewLimit,
   providerSessionHeaders,
   summaryContext,
@@ -45,7 +46,7 @@ test("summary validator rejects incomplete, blank, oversized and tool-call respo
   for (const result of [
     assistant("length"),
     assistant("stop", " "),
-    assistant("stop", "中".repeat(201)),
+    assistant("stop", "中".repeat(301)),
     {
       ...assistant(),
       content: [
@@ -63,16 +64,28 @@ test("summary validator rejects incomplete, blank, oversized and tool-call respo
     validateSummary(assistant("stop", "🧪".repeat(200))),
     "🧪".repeat(200),
   );
+  // 默认 200 的校验上限含 50% 冗余：300 接受，301 拒绝
+  assert.equal(
+    validateSummary(assistant("stop", "中".repeat(300))).length,
+    300,
+  );
 });
 
 test("overview limit is configurable: prompt, validation and parsing follow it", () => {
+  assert.equal(overviewHardLimit(200), 300);
+  assert.equal(overviewHardLimit(500), 750);
   assert.match(summaryPrompt(500), /不超过500个Unicode字符/);
   assert.equal(
     validateSummary(assistant("stop", "中".repeat(500)), 500),
     "中".repeat(500),
   );
+  // 配置 500 的校验上限为 750
+  assert.equal(
+    validateSummary(assistant("stop", "中".repeat(750)), 500).length,
+    750,
+  );
   assert.throws(() =>
-    validateSummary(assistant("stop", "中".repeat(501)), 500),
+    validateSummary(assistant("stop", "中".repeat(751)), 500),
   );
   assert.throws(() => validateSummary(assistant("stop", "中".repeat(10)), 5));
   assert.equal(parseOverviewLimit(undefined), 200);
@@ -172,7 +185,7 @@ test("failed background summary preserves raw evidence and does not resume recor
   const f = await sdkFixture(
     t,
     () => assistant(),
-    () => assistant("stop", "超".repeat(201)),
+    () => assistant("stop", "超".repeat(301)),
   );
   await f.session.prompt("Raw evidence must survive");
   await waitFor(() => !!f.archive.getRun("r1").summaryError);
