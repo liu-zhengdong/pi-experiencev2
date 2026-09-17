@@ -17,3 +17,9 @@
 - 发生：npm 登录成功后，首次发布仍逐包要求安全密钥验证；npm 12.0.2 的 `npm trust --help` 显示已支持命令行配置 Trusted Publisher。
 - 分析：登录、首次写入与后续 OIDC 发布是不同环节；命令行绑定可避免重复填写网页表单，但不替代账号要求的二步认证。
 - 改变：发布说明补充逐包认证提示及 `npm trust github` / `npm trust list`。三个包首次发布和隔离 `pi install npm:…` 均通过；增加补丁版本用于实际验证 OIDC 发布，而不以已发布版本的跳过分支充当验证。
+
+## 2026-09-17 · 发布入口路径修正
+
+- 发生：首次 Actions 发布把 `release/包名.tgz` 解析成 GitHub shorthand，尝试 SSH 克隆并失败；尚未进入 npm 认证与写入。
+- 分析：本机手工发布用的是绝对路径，未覆盖工作流内相对路径的实际入口。
+- 改变：工作流显式使用 `./release/包名.tgz`，CI 增加相同命令的 `npm publish --dry-run`。失败 tag 保留，使用下一补丁版本重验，不改写远端 tag。

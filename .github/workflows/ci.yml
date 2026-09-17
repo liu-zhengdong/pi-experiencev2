@@ -25,3 +25,7 @@ jobs:
           package-manager-cache: false
       - run: npm ci --ignore-scripts --no-audit --no-fund
       - run: npm run check && npm run test:package
+      - name: Rehearse tarball publish
+        run: |
+          tarball="$(find ./release -maxdepth 1 -name '*.tgz')"
+          npm publish "$tarball" --dry-run --access public

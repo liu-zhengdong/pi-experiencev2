@@ -35,7 +35,7 @@ jobs:
           set -euo pipefail
           name="$(node -p "require('./package.json').name")"
           version="$(node -p "require('./package.json').version")"
-          tarball="$(find release -maxdepth 1 -name '*.tgz')"
+          tarball="$(find ./release -maxdepth 1 -name '*.tgz')"
           if published_shasum="$(npm view "$name@$version" dist.shasum --registry=https://registry.npmjs.org/ 2>/dev/null)"; then
             local_shasum="$(sha1sum "$tarball" | awk '{print $1}')"
             if [[ "$local_shasum" != "$published_shasum" ]]; then
