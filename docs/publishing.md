@@ -8,7 +8,16 @@
 
 ## 首次配置
 
-首次发布需要维护者 npm 登录；包创建后，在 npm 包的 Settings → Trusted publishing 中添加 GitHub Actions：
+首次发布需要维护者 npm 登录；发布时可能还需逐包完成浏览器安全密钥验证。包创建后，可使用 npm 12 的 `trust` 命令绑定 GitHub Actions：
+
+```bash
+name="$(node -p "require('./package.json').name")"
+repo="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+npm trust github "$name" --file release.yml --repo "$repo" --allow-publish --yes
+npm trust list "$name" --json
+```
+
+该操作要求二步认证；已有有效认证时可能直接完成。以 `trust list` 返回的仓库与工作流为准。旧 npm 可在包的 Settings → Trusted publishing 中添加：
 
 - Organization or user：`liu-zhengdong`
 - Repository：当前 GitHub 仓库名（不含 npm scope）
