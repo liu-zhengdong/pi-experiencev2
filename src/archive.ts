@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import type { SQLInputValue } from "node:sqlite";
+import type { SQLInputValue, SQLOutputValue } from "node:sqlite";
 import { setImmediate } from "node:timers/promises";
 import {
   messagePreview,
@@ -241,19 +241,19 @@ export class Archive {
             "SELECT first_seq,payload FROM messages WHERE run_id=? ORDER BY first_seq",
           )
           .iterate(r.id);
+        let position = 0;
         for (const message of messages) {
+          position++;
+          const ref = `r${r.ordinal}/m${position}`;
           const body = textBodies(
-            parseMessage(
-              text(message, "payload"),
-              `m${integer(message, "first_seq")}`,
-            ),
+            parseMessage(text(message, "payload"), ref),
           ).find((body) => {
             const lower = body.toLowerCase();
             return terms.every((term) => lower.includes(term));
           });
           if (body !== undefined) {
             const index = body.toLowerCase().indexOf(terms[0] ?? "");
-            match = `\n命中 m${integer(message, "first_seq")} · ${preview(body.slice(Math.max(0, index - 80)).replaceAll("\n", " "), 240)}\nget_message_detail({"id":"m${integer(message, "first_seq")}"})`;
+            match = `\n命中 ${ref} · ${preview(body.slice(Math.max(0, index - 80)).replaceAll("\n", " "), 240)}\nget_message_detail({"id":"${ref}"})`;
             break;
           }
         }
@@ -342,13 +342,22 @@ export class Archive {
         "SELECT id, first_seq, role, payload FROM messages WHERE run_id=? AND first_seq>? AND first_seq<=? ORDER BY first_seq LIMIT ?",
       )
       .all(r.id, cursor?.at ?? 0, ceiling, limit + 1);
+    const startPosition = Number(
+      this.store.db
+        .prepare(
+          "SELECT count(*) AS n FROM messages WHERE run_id=? AND first_seq<=?",
+        )
+        .get(r.id, cursor?.at ?? 0)?.n,
+    );
     const parts: string[] = [],
       displayParts: string[] = [];
     const choices: Page<FindArgs>["choices"] = [];
     let bytes = 0,
-      at = cursor?.at ?? 0;
+      at = cursor?.at ?? 0,
+      position = startPosition;
     for (const row of rows.slice(0, limit)) {
-      const ref = `m${integer(row, "first_seq")}`;
+      position++;
+      const ref = `r${r.ordinal}/m${position}`;
       const snippet = preview(
         messagePreview(parseMessage(text(row, "payload"), ref)),
         1600,
@@ -394,12 +403,29 @@ export class Archive {
     const format = args.format ?? "text";
     if (format !== "text" && format !== "raw")
       throw new Error("format must be text or raw");
-    const numeric = /^m[1-9]\d*$/.test(args.id);
-    const row = this.store.db
-      .prepare(
-        `SELECT id,role FROM messages WHERE ${numeric ? "first_seq" : "id"}=?`,
-      )
-      .get(numeric ? Number(args.id.slice(1)) : args.id);
+    const composite = /^r([1-9]\d*)\/m([1-9]\d*)$/.exec(args.id);
+    let row: Record<string, SQLOutputValue> | undefined;
+    if (composite) {
+      // Run-scoped refs are derived from first_seq order; no stored ordinal.
+      const runRow = this.store.db
+        .prepare("SELECT id FROM runs WHERE ordinal=?")
+        .get(Number(composite[1]));
+      row = runRow
+        ? this.store.db
+            .prepare(
+              "SELECT id,role FROM messages WHERE run_id=? ORDER BY first_seq LIMIT 1 OFFSET ?",
+            )
+            .get(text(runRow, "id"), Number(composite[2]) - 1)
+        : undefined;
+    } else {
+      // Legacy global m-numbers and message UUIDs keep old citations readable.
+      const numeric = /^m[1-9]\d*$/.test(args.id);
+      row = this.store.db
+        .prepare(
+          `SELECT id,role FROM messages WHERE ${numeric ? "first_seq" : "id"}=?`,
+        )
+        .get(numeric ? Number(args.id.slice(1)) : args.id);
+    }
     if (!row)
       throw new Error(`Message not found (or its Run was deleted): ${args.id}`);
     // Terminal messages are immutable. Validate existence even when the text projection is cached.

@@ -242,7 +242,7 @@ export function registerCommands(
 ): void {
   pi.registerCommand("runs", {
     description:
-      "浏览 Run 归档；search <关键词> / all / rID / mID / summary rID / debug",
+      "浏览 Run 归档；search <关键词> / all / rID / rID/mID / summary rID / debug",
     async handler(args, ctx) {
       try {
         const s = state(),
@@ -278,7 +278,9 @@ export function registerCommands(
           );
           return;
         }
-        const messageRef = /^(m[1-9]\d*)(?: (raw))?$/.exec(input);
+        const messageRef = /^((?:r[1-9]\d*\/)?m[1-9]\d*)(?: (raw))?$/.exec(
+          input,
+        );
         const view: View = messageRef
           ? {
               kind: "detail",
