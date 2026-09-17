@@ -19,12 +19,12 @@ export function summaryPrompt(limit: number): string {
 
 /** Parse --runs-overview-limit / PI_RUNS_OVERVIEW_LIMIT. */
 export function parseOverviewLimit(
-  value: string | boolean | undefined,
+  value: string | number | boolean | undefined,
 ): number {
   if (value === undefined || value === "") return DEFAULT_OVERVIEW_LIMIT;
-  if (typeof value !== "string")
+  if (typeof value !== "string" && typeof value !== "number")
     throw new Error(
-      `runs-overview-limit must be a string integer 1–${MAX_OVERVIEW_LIMIT}, got ${JSON.stringify(value)}`,
+      `runs-overview-limit must be an integer 1–${MAX_OVERVIEW_LIMIT}, got ${JSON.stringify(value)}`,
     );
   const limit = Number(value);
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_OVERVIEW_LIMIT)

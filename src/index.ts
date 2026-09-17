@@ -6,6 +6,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 import { Archive } from "./archive.ts";
+import { loadConfig } from "./config.ts";
 import { type RecordedEvent, RunRecorder } from "./recorder.ts";
 import { RunStore } from "./store.ts";
 import { parseOverviewLimit, Summaries } from "./summary.ts";
@@ -75,7 +76,17 @@ export default function runArchive(pi: ExtensionAPI): void {
     uiContext = ctx;
     try {
       if (!recorder) {
-        const selected = pi.getFlag("runs-db") ?? process.env.PI_RUNS_DB;
+        let config: ReturnType<typeof loadConfig> = {};
+        try {
+          config = loadConfig(getAgentDir());
+        } catch (error) {
+          ctx.ui.notify(
+            `pi-experiencev2 配置文件无效，已忽略：${String(error)}`,
+            "error",
+          );
+        }
+        const selected =
+          pi.getFlag("runs-db") ?? process.env.PI_RUNS_DB ?? config.db;
         const path =
           typeof selected === "string" && selected.trim()
             ? resolve(ctx.cwd, selected)
@@ -94,11 +105,14 @@ export default function runArchive(pi: ExtensionAPI): void {
           throw error;
         }
         archive = new Archive(store);
+        const noSummary =
+          pi.getFlag("runs-no-summary") === true || config.noSummary === true;
         let overviewLimit: number | undefined;
         try {
           overviewLimit = parseOverviewLimit(
             pi.getFlag("runs-overview-limit") ??
-              process.env.PI_RUNS_OVERVIEW_LIMIT,
+              process.env.PI_RUNS_OVERVIEW_LIMIT ??
+              config.overviewLimit,
           );
         } catch (error) {
           ctx.ui.notify(
@@ -106,7 +120,7 @@ export default function runArchive(pi: ExtensionAPI): void {
             "error",
           );
         }
-        if (!pi.getFlag("runs-no-summary") && overviewLimit !== undefined) {
+        if (!noSummary && overviewLimit !== undefined) {
           summaries = new Summaries(
             archive,
             (notice) => {
