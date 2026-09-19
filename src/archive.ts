@@ -9,6 +9,7 @@ import {
   textBodies,
 } from "./content.ts";
 import { integer, runFromRow, text } from "./data.ts";
+import { parseQuery, queryHitIndex, queryMatches, querySql } from "./query.ts";
 import type { RunStore } from "./store.ts";
 
 export type FindArgs = {
@@ -173,8 +174,8 @@ export class Archive {
     const scope = args.scope ?? "all";
     if (scope !== "all" && scope !== "summary" && scope !== "content")
       throw new Error("scope must be all, summary or content");
-    const terms = query.toLowerCase().split(/\s+/u).filter(Boolean);
-    if (scope === "content" && !terms.length)
+    const parsed = parseQuery(query);
+    if (scope === "content" && !parsed.clauses.length)
       throw new Error("Content search needs nonempty keywords");
     const since = args.since === undefined ? undefined : date(args.since);
     const until = args.until === undefined ? undefined : date(args.until);
@@ -204,18 +205,19 @@ export class Archive {
       where.push("r.started_at<?");
       values.push(until);
     }
+    const haystack =
+      "lower(coalesce(r.overview,'') || char(10) || r.goal || char(10) || s.cwd || char(10) || r.agent_id)";
     if (scope === "summary") {
-      for (const term of terms) {
-        where.push(
-          "instr(lower(coalesce(r.overview,'') || char(10) || r.goal || char(10) || s.cwd || char(10) || r.agent_id),?)>0",
-        );
-        values.push(term);
+      const sql = querySql(haystack, parsed);
+      if (sql) {
+        where.push(sql.sql);
+        values.push(...sql.values);
       }
     }
     // Bound a content scan. A continuation means 'not searched yet', never 'no matches'.
     const rows = this.store.db
       .prepare(
-        `${SELECT} WHERE ${where.join(" AND ")} ORDER BY r.ordinal DESC LIMIT ${scope === "summary" || !terms.length ? limit + 1 : 251}`,
+        `${SELECT} WHERE ${where.join(" AND ")} ORDER BY r.ordinal DESC LIMIT ${scope === "summary" || !parsed.clauses.length ? limit + 1 : 251}`,
       )
       .all(...values);
     const choices: Page<FindArgs>["choices"] = [];
@@ -230,10 +232,9 @@ export class Archive {
       let match = "";
       const summaryHit =
         scope !== "content" &&
-        terms.every((term) =>
-          `${r.overview ?? ""}\n${r.goal}\n${r.cwd}\n${r.agentId}`
-            .toLowerCase()
-            .includes(term),
+        queryMatches(
+          `${r.overview ?? ""}\n${r.goal}\n${r.cwd}\n${r.agentId}`,
+          parsed,
         );
       if (!summaryHit && scope !== "summary") {
         const messages = this.store.db
@@ -247,12 +248,9 @@ export class Archive {
           const ref = `r${r.ordinal}/m${position}`;
           const body = textBodies(
             parseMessage(text(message, "payload"), ref),
-          ).find((body) => {
-            const lower = body.toLowerCase();
-            return terms.every((term) => lower.includes(term));
-          });
+          ).find((body) => queryMatches(body, parsed));
           if (body !== undefined) {
-            const index = body.toLowerCase().indexOf(terms[0] ?? "");
+            const index = queryHitIndex(body, parsed);
             match = `\n命中 ${ref} · ${preview(body.slice(Math.max(0, index - 80)).replaceAll("\n", " "), 240)}\nget_message_detail({"id":"${ref}"})`;
             break;
           }
@@ -311,12 +309,12 @@ export class Archive {
       ? displayParts.join("\n\n")
       : more
         ? "本页未命中。N 继续搜索剩余历史。"
-        : terms.length
+        : parsed.clauses.length
           ? `没有匹配的 Run。S 换关键词${args.cwd === undefined ? "。" : "，或 A 扩大到全库。"}`
           : `当前范围还没有 Run。开始对话后会自动记录${args.cwd === undefined ? "。" : "；A 查看全库。"}`;
     return {
       text: textResult,
-      displayText: terms.length
+      displayText: parsed.clauses.length
         ? `关键词：${query}\n\n${displayText}`
         : displayText,
       ...(next ? { next } : {}),
