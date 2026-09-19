@@ -16,7 +16,7 @@
 | `src/recorder.ts` | 按宿主事件切分 Run，保存完整消息并关闭录制 |
 | `src/store.ts`、`src/schema.ts`、`src/data.ts` | 独立 SQLite 库、格式检查、事务、写入者与恢复 |
 | `src/summary.ts` | 从本轮归档构建有限证据，后台生成并校验摘要 |
-| `src/archive.ts`、`src/content.ts` | 关键词检索、预览、分页读取与删除 |
+| `src/archive.ts`、`src/query.ts`、`src/content.ts` | 关键词语法与检索、预览、分页读取与删除 |
 | `src/tools.ts`、`src/tool-render.ts` | 模型工具、参数展示与可展开的调用卡片 |
 | `src/ui.ts` | `/runs` 阅读面板 |
 

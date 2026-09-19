@@ -77,3 +77,9 @@
 - 发生：代码健康评审指出 providerSessionHeaders 手工复刻 pi 内部 getSessionHeaders，属跨包复制的业务规则，上游调整会静默失配；pi 包入口未导出该函数，无法直接引用。
 - 分析：深层导入 dist/core/provider-attribution.js 路径同样脆弱，不宜进运行时；但在测试里对照上游实现可行且成本最低。
 - 改变：测试通过 import.meta.resolve 从包入口推导 provider-attribution.js，以 telemetry 关闭的 stub 调 mergeProviderAttributionHeaders，对 7 种 provider/baseUrl 形态 × 空/非空 sessionId 与镜像函数逐例断言一致。对照立即发现并修正镜像缺失空 sessionId 守卫（会发出空会话头）。42 项测试、重建与隔离副本端到端摘要已验证。
+
+## 2026-09-19 · find_run 增加 OR 与双引号短语
+
+- 发生：用户指出 find_run 不支持类似 rg 的多关键词语法。随后用 r639 验证：约 46 次 find_run、约 25 个近义词全库扫描，真正有用的是「我的想法是」「不认可」和摘要里的「用户纠正」。用户确认方案并要求发新版本。
+- 分析：缺 OR 把一组同义词逼成多遍扫描。完整正则会改变字面量默认、提高误写成本。空白 AND 仍然有用。排除词在该次检索里没有独立价值。
+- 改变：保留空白 AND 字面量；仅增加大写 `OR` 与双引号短语。命中仍要求某一子句落在同一文本块。解析集中在 src/query.ts，摘要 SQL 与正文扫描共用。不上正则、不加排除词、不加 `|`。

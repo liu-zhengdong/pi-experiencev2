@@ -206,7 +206,10 @@ async function browse(
             : { kind: "detail", args: { id: item.id } },
         );
     } else if (action === "s") {
-      const query = await ctx.ui.input("搜索归档", "关键词（摘要与正文）");
+      const query = await ctx.ui.input(
+        "搜索归档",
+        '关键词（空白 AND，OR，"短语"）',
+      );
       if (query !== undefined)
         stack.push({
           kind: "find",

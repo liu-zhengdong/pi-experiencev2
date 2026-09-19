@@ -48,6 +48,16 @@ test("archive search covers summaries, full text, metadata and exact time/direct
   );
   const hit = await f.archive.find({ query: "SQLITE", scope: "content" });
   assert.match(hit.text, /命中 r1\/m2 · /);
+  assert.equal(
+    (await f.archive.find({ query: '"SQLITE外键"', scope: "content" })).choices
+      .length,
+    1,
+  );
+  assert.equal(
+    (await f.archive.find({ query: '"SQLITE 外键"', scope: "content" })).choices
+      .length,
+    0,
+  );
   assert.equal(f.archive.getRun("r1").id, id);
   assert.match(
     (await f.archive.find({ id: "r1" })).text,
@@ -55,6 +65,28 @@ test("archive search covers summaries, full text, metadata and exact time/direct
   );
   assert.deepEqual(f.store.db.prepare("PRAGMA foreign_key_check").all(), []);
   assert.equal(statSync(f.path).mode & 0o777, 0o600);
+});
+
+test("search OR matches either alternative; AND, lowercase or and bad syntax stay strict", async (t) => {
+  const f = recording(t);
+  const a = finishRun(f.recorder, "alpha", assistant("stop", "完全不认可"));
+  const b = finishRun(f.recorder, "beta", assistant("stop", "先确认再落盘"));
+  f.store.db
+    .prepare("UPDATE runs SET overview=? WHERE id=?")
+    .run("用户否定心跳方案", a);
+  f.store.db
+    .prepare("UPDATE runs SET overview=? WHERE id=?")
+    .run("确认思路后落盘", b);
+  const ids = async (query: string, scope?: "summary" | "content") =>
+    (await f.archive.find({ query, ...(scope ? { scope } : {}) })).choices.map(
+      (c) => c.id,
+    );
+  assert.deepEqual(await ids("不认可 OR 落盘", "content"), ["r2", "r1"]);
+  assert.deepEqual(await ids("否定 OR 落盘", "summary"), ["r2", "r1"]);
+  assert.deepEqual(await ids("不认可 落盘", "content"), []);
+  assert.deepEqual(await ids("不认可 or 落盘", "content"), []);
+  for (const query of ["foo OR", '"unterminated', '"foo"bar'])
+    await assert.rejects(f.archive.find({ query }), /OR|quote|phrase/i, query);
 });
 
 test("search rejects misleading matches in attachments, reasoning, tool args and across text blocks", async (t) => {
@@ -100,6 +132,11 @@ test("search rejects misleading matches in attachments, reasoning, tool args and
       0,
       query,
     );
+  assert.equal(
+    (await f.archive.find({ query: "first OR second", scope: "content" }))
+      .choices.length,
+    1,
+  );
   for (const args of [
     { scope: "content", query: " " },
     { since: "yesterday" },
