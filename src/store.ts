@@ -242,9 +242,16 @@ export class RunStore {
     event: CapturedEvent,
     finish = false,
   ): void {
+    // Writing a screenshot out and re-encoding it takes hundreds of times
+    // longer than the inserts, and touches nothing the database protects. It
+    // happens before the write lock is taken, not while holding it against
+    // every other session recording into this archive.
+    const body = event.message
+      ? externalize(event.message.payload, this.blobs)
+      : null;
     this.transaction(() => {
       this.assertWriter(binding);
-      const inserted = this.insertEvent(binding, runRef, event);
+      const inserted = this.insertEvent(binding, runRef, event, body);
       if (!inserted) return;
       if (finish && runRef) this.finishRun(runRef, event.at, event.at);
     });
@@ -254,6 +261,9 @@ export class RunStore {
     binding: Binding,
     runRef: number | null,
     event: CapturedEvent,
+    /** The message payload with its media already externalized. Null for the
+     *  internal events, which carry no message. */
+    body: unknown,
   ): boolean {
     // A message body is stored exactly once, in messages. The event is its marker.
     const payload = json(event.message ? { type: event.kind } : event.payload);
@@ -303,8 +313,6 @@ export class RunStore {
       const message = event.message;
       if (this.db.prepare("SELECT 1 FROM messages WHERE id=?").get(message.id))
         throw new Error("Cannot change a terminal or foreign message");
-      // Encoded media leaves the row before anything measures or compresses it.
-      const body = externalize(message.payload, this.blobs);
       const { blob, dictId } = encode(json(body), this.writeDictionary);
       this.db
         .prepare(
@@ -373,6 +381,7 @@ export class RunStore {
           at,
           payload: { reason },
         },
+        null,
       );
       // We observed recording stop, not the original execution's end time.
       this.finishRun(ordinal, null, at);
@@ -403,7 +412,7 @@ export class RunStore {
           event.at,
         );
       const next = { ...binding, branchRef: Number(created?.ref) };
-      this.insertEvent(next, null, event);
+      this.insertEvent(next, null, event, null);
       return next;
     });
   }

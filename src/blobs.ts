@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
+import { toWebp } from "./webp.ts";
 
 /** Encoded media is the largest thing an archive stores and the one thing it
  *  never reads back through a text path: search matches only text blocks, and
@@ -89,16 +90,22 @@ function externalizeBlock(block: ImageBlock, store: BlobStore): unknown {
   } catch {
     return block;
   }
+  // Same pixels, less than half the disk, where an encoder is available.
+  const encoded = toWebp(bytes, media);
+  const stored = encoded ?? bytes;
+  const storedType = encoded ? "image/webp" : media;
   let ref: BlobRef;
   try {
-    ref = store.put(bytes, media);
+    ref = store.put(stored, storedType);
   } catch {
     // A blob that cannot be written must not cost the message. Recording the
     // payload inline keeps the Run complete; the next capture retries the file.
     return block;
   }
   const { data: _dropped, ...rest } = block;
-  return { ...rest, ref, bytes: bytes.length };
+  // The reference names the digest of what is in the file, and the media type
+  // describes it, so a reader never has to know which encoder wrote the Run.
+  return { ...rest, ref, mimeType: storedType, bytes: stored.length };
 }
 
 /** Rewrites encoded media in a message payload into blob references. */

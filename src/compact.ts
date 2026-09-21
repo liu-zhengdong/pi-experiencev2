@@ -52,18 +52,25 @@ export function compact(
   for (;;) {
     const rows = select.all(BATCH);
     if (!rows.length) break;
+    // Re-encoding images and compressing bodies is nearly all of the pass and
+    // needs no lock; only the updates do. A batch is prepared first, then
+    // written, so a long pass never blocks a session that is recording.
+    const rewritten = rows.map((row) => {
+      const text = decodeRow(row.payload, row.dict_id, store.dictionaries);
+      const body = externalize(parse(text), store.blobs);
+      return {
+        id: String(row.id),
+        before: Buffer.byteLength(text),
+        ...encode(json(body), dictionary),
+      };
+    });
     db.exec("BEGIN IMMEDIATE");
     try {
-      for (const row of rows) {
-        const id = String(row.id);
-        const text = decodeRow(row.payload, row.dict_id, store.dictionaries);
-        const before = Buffer.byteLength(text);
-        const body = externalize(parse(text), store.blobs);
-        const { blob, dictId } = encode(json(body), dictionary);
-        update.run(blob, dictId, id);
+      for (const row of rewritten) {
+        update.run(row.blob, row.dictId, row.id);
         progress.done++;
-        progress.bytesBefore += before;
-        progress.bytesAfter += blob.length;
+        progress.bytesBefore += row.before;
+        progress.bytesAfter += row.blob.length;
       }
       db.exec("COMMIT");
     } catch (error) {
