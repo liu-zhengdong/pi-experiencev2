@@ -62,8 +62,8 @@ export function runFromRow(row: Row) {
     overview: nullableText(row, "overview"),
     summaryError: nullableText(row, "summary_error"),
     goal: text(row, "goal"),
-    sessionId: text(row, "session_id"),
-    branchId: text(row, "branch_id"),
+    sessionRef: integer(row, "session_ref"),
+    branchRef: integer(row, "branch_ref"),
     number: integer(row, "number"),
     agentId: text(row, "agent_id"),
     recording: status === "running",
@@ -86,8 +86,11 @@ export interface CapturedEvent {
   message?: MessageSnapshot;
 }
 
+/** Identifies the session and branch a recorder writes to. Events reference
+ *  rows by their integer keys, so the binding carries those rather than the
+ *  text ids, which exist only for citations that outlive a database. */
 export interface Binding {
-  sessionId: string;
-  branchId: string;
+  sessionRef: number;
+  branchRef: number;
   token: string;
 }

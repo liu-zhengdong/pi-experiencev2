@@ -7,7 +7,13 @@ import { Archive, type FindArgs } from "../src/archive.ts";
 import { integer, text } from "../src/data.ts";
 import { RunRecorder } from "../src/recorder.ts";
 import { RunStore } from "../src/store.ts";
-import { assistant, finishRun, recording, workspace } from "./helpers.ts";
+import {
+  assistant,
+  finishRun,
+  ordinalOf,
+  recording,
+  workspace,
+} from "./helpers.ts";
 
 test("archive search covers summaries, full text, metadata and exact time/directory filters", async (t) => {
   const f = recording(t);
@@ -199,11 +205,15 @@ test("message detail pagination is lossless for emoji, text, reasoning, tool JSO
   const ref = messages.choices[0]?.id;
   assert.ok(ref);
   assert.equal(ref, "r1/m1");
-  const expectedRaw = f.store.db
+  const expectedRow = f.store.db
     .prepare(
-      "SELECT payload FROM messages WHERE run_id=? ORDER BY first_seq LIMIT 1",
+      "SELECT payload, dict_id FROM messages WHERE run_ref=? ORDER BY first_seq LIMIT 1",
     )
-    .get(id)?.payload;
+    .get(ordinalOf(f.store, id));
+  const expectedRaw = f.store.payloadText(
+    expectedRow?.payload,
+    expectedRow?.dict_id,
+  );
   for (const format of ["text", "raw"] as const) {
     let args:
       | { id: string; format: "text" | "raw"; cursor?: string }
@@ -259,9 +269,9 @@ test("message refs are run-scoped and reset per run; legacy global refs and UUID
   // Legacy global m-number and UUID resolve to the same message body.
   const stored = f.store.db
     .prepare(
-      "SELECT id, first_seq FROM messages WHERE run_id=? ORDER BY first_seq LIMIT 1 OFFSET 1",
+      "SELECT id, first_seq FROM messages WHERE run_ref=? ORDER BY first_seq LIMIT 1 OFFSET 1",
     )
-    .get(one);
+    .get(ordinalOf(f.store, one));
   assert.ok(stored);
   const body = (page: string) => page.slice(page.indexOf("\n---\n"));
   assert.equal(
@@ -279,10 +289,10 @@ test("deletion is atomic, idempotent and bounded; neither live Runs nor unknown 
     one = finishRun(f.recorder),
     two = finishRun(f.recorder);
   f.recorder.capture({ type: "agent_start" });
-  const active = f.recorder.runId;
+  const active = f.recorder.runRef;
   assert.ok(active);
   const before = JSON.stringify(f.store.db.prepare("SELECT * FROM runs").all());
-  for (const ids of [[one, active], [one, "missing"], []])
+  for (const ids of [[one, `r${active}`], [one, "missing"], []])
     assert.throws(() => f.archive.deleteRuns(ids, "用户要求清理测试"));
   assert.throws(() => f.archive.deleteRuns([one], " "));
   assert.equal(
@@ -300,10 +310,11 @@ test("deletion is atomic, idempotent and bounded; neither live Runs nor unknown 
   );
   assert.equal(
     f.store.db
-      .prepare("SELECT count(*) AS n FROM messages WHERE run_id=?")
-      .get(one)?.n,
+      .prepare("SELECT count(*) AS n FROM messages WHERE run_ref=?")
+      .get(ordinalOf(f.store, one))?.n,
     2,
   );
+  const ordinals = [ordinalOf(f.store, one), ordinalOf(f.store, two)];
   f.store.db.exec("DROP TRIGGER fail_delete");
   assert.deepEqual(f.archive.deleteRuns([one, "r1", two], "用户授权"), {
     deleted: ["r1", "r2"],
@@ -318,8 +329,8 @@ test("deletion is atomic, idempotent and bounded; neither live Runs nor unknown 
   for (const table of ["messages", "events"])
     assert.equal(
       f.store.db
-        .prepare(`SELECT count(*) AS n FROM ${table} WHERE run_id IN (?,?)`)
-        .get(one, two)?.n,
+        .prepare(`SELECT count(*) AS n FROM ${table} WHERE run_ref IN (?,?)`)
+        .get(ordinals[0] ?? 0, ordinals[1] ?? 0)?.n,
       0,
     );
   assert.deepEqual(f.store.db.prepare("PRAGMA foreign_key_check").all(), []);
@@ -372,18 +383,18 @@ test("single-writer ownership and branch isolation apply to every kind of record
     assert.equal(f.archive.getRun(id).recording, false);
     assert.ok(f.archive.getRun(id).endedAt);
     assert.deepEqual(
-      f.store.messages(f.sessionId, id).at(-1)?.payload,
+      f.store.messages(f.sessionRef, ordinalOf(f.store, id)).at(-1)?.payload,
       message,
     );
   }
-  const before = f.recorder.binding.branchId;
+  const before = f.recorder.binding.branchRef;
   f.recorder.capture({
     type: "session_tree",
     newLeafId: "old-tree-entry",
     oldLeafId: "current",
     fromExtension: false,
   });
-  assert.notEqual(f.recorder.binding.branchId, before);
+  assert.notEqual(f.recorder.binding.branchRef, before);
   const id = finishRun(f.recorder);
-  assert.equal(f.archive.getRun(id).branchId, f.recorder.binding.branchId);
+  assert.equal(f.archive.getRun(id).branchRef, f.recorder.binding.branchRef);
 });

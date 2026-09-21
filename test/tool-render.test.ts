@@ -138,7 +138,7 @@ test("find cards keep candidates compact, distinguish continuation from no match
   assert.notEqual(row.render(100).join("\n"), dark);
   row.setExpanded(false);
   row.updateResult(result({ page: { count: 0, choices: [], more: true } }));
-  assert.match(plain(row), /本页未命中，仍有历史未搜索/);
+  assert.match(plain(row), /本页未命中，尚有历史未搜索/);
   assert.doesNotMatch(plain(row), /没有匹配/);
   row.updateResult(result({ page: { count: 0, choices: [], more: false } }));
   assert.match(plain(row), /没有匹配的 Run/);

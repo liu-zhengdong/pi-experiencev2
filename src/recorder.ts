@@ -94,7 +94,8 @@ export class RunRecorder {
   readonly store: RunStore;
   readonly agentId: string;
   binding: Binding;
-  runId: string | null = null;
+  /** The ordinal of the Run being recorded, or null between Runs. */
+  runRef: number | null = null;
   private openMessages = new Map<string, string>();
   private closed = false;
 
@@ -117,7 +118,7 @@ export class RunRecorder {
     const at = new Date().toISOString();
     if (event.type === "agent_start") {
       // Pi emits another agent_start for automatic continuations. Keep the same Run.
-      this.runId = this.store.startRun(this.binding, this.agentId, at);
+      this.runRef = this.store.startRun(this.binding, this.agentId, at);
     }
     // Streamed frames carry no terminal evidence: the message_end projection and
     // the final tool result already contain the content. Writing them per frame
@@ -154,7 +155,7 @@ export class RunRecorder {
         payload: event.message,
       };
       captured.payload = { type: "message_end" };
-      this.store.append(this.binding, this.runId, captured);
+      this.store.append(this.binding, this.runRef, captured);
       this.openMessages.delete(key);
       return;
     }
@@ -164,18 +165,18 @@ export class RunRecorder {
         captured,
         event.newLeafId,
       );
-      this.runId = null;
+      this.runRef = null;
       this.openMessages.clear();
       return;
     }
-    if (event.type === "agent_settled" && this.runId) {
+    if (event.type === "agent_settled" && this.runRef) {
       // Settlement closes recording, irrespective of how the model/tools ended.
-      this.store.append(this.binding, this.runId, captured, true);
-      this.runId = null;
+      this.store.append(this.binding, this.runRef, captured, true);
+      this.runRef = null;
       this.openMessages.clear();
       return;
     }
-    this.store.append(this.binding, this.runId, captured);
+    this.store.append(this.binding, this.runRef, captured);
     if (event.type === "session_info_changed")
       this.store.rename(this.binding, event.name ?? null);
   }

@@ -34,7 +34,7 @@ for (const cancel of [false, true]) {
     assert.ok(f.archive.getRun("r1").endedAt);
     assert.ok(
       f.reader
-        .events(f.sessionId, f.archive.getRun("r1").id)
+        .events(f.sessionRef, f.archive.getRun("r1").ordinal)
         .some(
           (event) =>
             event.kind === "tool_execution_end" &&
@@ -76,13 +76,13 @@ test("settlement stops recording without classifying missing, foreign or non-ter
         },
       });
     }
-    const id = f.recorder.runId;
+    const id = f.recorder.runRef;
     assert.ok(id);
-    const messages = f.store.messages(f.sessionId, id);
+    const messages = f.store.messages(f.sessionRef, id);
     f.recorder.capture({ type: "agent_settled" });
     assert.equal(f.archive.getRun("r1").recording, false, kind);
     assert.ok(f.archive.getRun("r1").endedAt);
     assert.equal("status" in f.archive.getRun("r1"), false);
-    assert.deepEqual(f.store.messages(f.sessionId, id), messages);
+    assert.deepEqual(f.store.messages(f.sessionRef, id), messages);
   }
 });

@@ -61,17 +61,23 @@ export function recording(t: TestContext) {
     store,
     recorder,
     archive: new Archive(store),
-    sessionId: recorder.binding.sessionId,
+    sessionRef: recorder.binding.sessionRef,
   };
 }
+/** Records a complete Run and returns its stable id. */
 export function finishRun(
   recorder: RunRecorder,
   content = "Work",
   result = assistant(),
 ): string {
   recorder.capture({ type: "agent_start" });
-  const id = recorder.runId;
-  assert.ok(id);
+  const ordinal = recorder.runRef;
+  assert.ok(ordinal);
+  const id = String(
+    recorder.store.db
+      .prepare("SELECT id FROM runs WHERE ordinal=?")
+      .get(ordinal)?.id,
+  );
   const user = { role: "user" as const, content, timestamp: Date.now() };
   for (const message of [user, result]) {
     recorder.capture({ type: "message_start", message });
@@ -88,4 +94,12 @@ export function toolCall(
     ...assistant("toolUse"),
     content: [{ type: "toolCall", id: `call-${name}`, name, arguments: args }],
   };
+}
+
+/** A Run's integer key, for store-level calls that address it by ordinal
+ *  rather than by the id used in citations. */
+export function ordinalOf(store: RunStore, id: string): number {
+  const row = store.db.prepare("SELECT ordinal FROM runs WHERE id=?").get(id);
+  assert.ok(row, `Unknown Run: ${id}`);
+  return Number(row.ordinal);
 }

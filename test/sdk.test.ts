@@ -40,10 +40,10 @@ test("real SDK records a tool roundtrip; all three tools are callable and histor
   const r = f.archive.getRun("r1");
   assert.equal(r.recording, false);
   assert.deepEqual(
-    f.reader.messages(f.sessionId, r.id).map((m) => m.role),
+    f.reader.messages(f.sessionRef, r.ordinal).map((m) => m.role),
     ["user", "assistant", "toolResult", "assistant"],
   );
-  const events = f.reader.events(f.sessionId, r.id, 0, 200);
+  const events = f.reader.events(f.sessionRef, r.ordinal, 0, 200);
   assert.ok(events.some((e) => e.kind === "tool_execution_end"));
   assert.ok(!events.some((e) => /_update$/.test(e.kind)));
   assert.ok(
@@ -91,10 +91,10 @@ test("SDK retry, steering and queued follow-up keep one Run until agent_settled"
   await f.session.followUp("Also report limits");
   release.resolve();
   await work;
-  const runs = f.reader.runs(f.sessionId);
+  const runs = f.reader.runs(f.sessionRef);
   assert.equal(runs.length, 1);
   assert.equal(runs[0]?.recording, false);
-  const messages = f.reader.messages(f.sessionId, runs[0]?.id ?? null);
+  const messages = f.reader.messages(f.sessionRef, runs[0]?.ordinal ?? null);
   assert.equal(messages.filter((m) => m.role === "user").length, 3);
   f.checkErrors();
 });
@@ -222,7 +222,7 @@ test("recorder errors request abort and release recording without fabricating me
   assert.equal(f.archive.getRun("r1").recording, false);
   assert.equal(f.archive.getRun("r1").endedAt, null);
   assert.deepEqual(
-    f.reader.messages(f.sessionId, f.archive.getRun("r1").id),
+    f.reader.messages(f.sessionRef, f.archive.getRun("r1").ordinal),
     [],
   );
 });
@@ -232,7 +232,7 @@ test("reload releases the writer and retains earlier Runs without injecting hist
   await f.session.prompt("First task");
   await f.session.reload();
   await f.session.prompt("Second task");
-  assert.equal(f.reader.runs(f.sessionId).length, 2);
+  assert.equal(f.reader.runs(f.sessionRef).length, 2);
   assert.equal(f.session.messages.filter((m) => m.role === "user").length, 2);
   f.checkErrors();
 });

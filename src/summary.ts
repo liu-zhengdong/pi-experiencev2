@@ -78,10 +78,12 @@ export function summaryContext(
     omitted = false;
   for (const m of db
     .prepare(
-      "SELECT role,payload FROM messages WHERE run_id=? ORDER BY first_seq DESC",
+      "SELECT role,payload,dict_id FROM messages WHERE run_ref=? ORDER BY first_seq DESC",
     )
-    .iterate(r.id)) {
-    const payload = object(parse(text(m, "payload")));
+    .iterate(r.ordinal)) {
+    const payload = object(
+      parse(archive.store.payloadText(m.payload, m.dict_id)),
+    );
     // Private reasoning is not verified execution evidence and can crowd out the actual answer.
     if (Array.isArray(payload.content))
       payload.content = payload.content.filter(

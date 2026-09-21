@@ -171,9 +171,9 @@ export async function sdkFixture(
   });
   const reader = new RunStore(f.path),
     archive = new Archive(reader);
-  const sessionId = String(
-    reader.db.prepare("SELECT id FROM sessions").get()?.id,
-  );
+  const sessionRow = reader.db.prepare("SELECT id, ref FROM sessions").get();
+  const sessionId = String(sessionRow?.id);
+  const sessionRef = Number(sessionRow?.ref);
   f.cleanup(() => reader.close());
   f.cleanup(() => session.dispose());
   const shutdown = async () => {
@@ -193,6 +193,7 @@ export async function sdkFixture(
     reader,
     archive,
     sessionId,
+    sessionRef,
     loaded,
     parentRequests,
     summaryRequests,

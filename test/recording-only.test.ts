@@ -4,7 +4,7 @@ import { Archive } from "../src/archive.ts";
 import { parse } from "../src/data.ts";
 import { RunStore } from "../src/store.ts";
 import { summaryContext } from "../src/summary.ts";
-import { assistant, finishRun, recording } from "./helpers.ts";
+import { assistant, finishRun, ordinalOf, recording } from "./helpers.ts";
 import { sdkFixture, waitFor } from "./sdk-helper.ts";
 
 const badges =
@@ -22,8 +22,8 @@ test("legacy outcomes produce identical status-free reading and summary inputs w
     .run(id);
   const readRows = () => ({
     run: f.store.db.prepare("SELECT * FROM runs WHERE id=?").get(id),
-    messages: f.store.messages(f.sessionId, id),
-    events: f.store.events(f.sessionId, id),
+    messages: f.store.messages(f.sessionRef, ordinalOf(f.store, id)),
+    events: f.store.events(f.sessionRef, ordinalOf(f.store, id)),
   });
   const reopen = new RunStore(f.path);
   f.cleanup(() => reopen.close());
@@ -56,7 +56,7 @@ test("legacy outcomes produce identical status-free reading and summary inputs w
     JSON.stringify(expectedSummary),
     /Run状态|recovery_required|completed只表示/,
   );
-  assert.equal(reopen.db.prepare("PRAGMA user_version").get()?.user_version, 1);
+  assert.equal(reopen.db.prepare("PRAGMA user_version").get()?.user_version, 2);
 });
 
 test("status words in historical summaries and original messages are evidence, not text to strip", async (t) => {
