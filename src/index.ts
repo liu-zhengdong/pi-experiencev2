@@ -142,9 +142,9 @@ export default function runArchive(pi: ExtensionAPI): void {
           );
         }
       }
-      const settled = event.type === "agent_settled" ? recorder.runId : null;
+      const settled = event.type === "agent_settled" ? recorder.runRef : null;
       recorder.capture(event);
-      if (settled) summaries?.enqueue(settled, ctx);
+      if (settled) summaries?.enqueue(`r${settled}`, ctx);
     } catch (error) {
       failure = String(error);
       ctx.ui.setStatus("runs-error", "Run 录制失败");

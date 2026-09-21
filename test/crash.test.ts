@@ -46,7 +46,7 @@ for (const resumeId of ["crash-session", "different-session"])
     assert.equal(run.endedAt, null);
     assert.ok(
       store
-        .events(run.sessionId, run.id)
+        .events(run.sessionRef, run.ordinal)
         .some(
           (event) =>
             event.kind === "archive.recording_stopped" &&

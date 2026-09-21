@@ -7,6 +7,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { FindArgs, Page } from "./archive.ts";
 import { object, preview } from "./content.ts";
+import { NO_MATCH, NO_MESSAGES, PAGE_MISSED } from "./wording.ts";
 
 type CallRenderer = NonNullable<ToolDefinition["renderCall"]>;
 type ResultRenderer = NonNullable<ToolDefinition["renderResult"]>;
@@ -185,10 +186,10 @@ export const renderFindResult: ResultRenderer = (
   const title = page.count
     ? `本页 ${page.count} 条${reading ? "消息" : " Run"}`
     : reading
-      ? "尚无已保存的消息。"
+      ? NO_MESSAGES
       : page.more
-        ? "本页未命中，仍有历史未搜索。"
-        : "没有匹配的 Run。";
+        ? PAGE_MISSED
+        : NO_MATCH;
   const lines = [theme.fg("muted", title)];
   for (const choice of page.choices)
     lines.push(

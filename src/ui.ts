@@ -11,6 +11,7 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { Archive, DetailArgs, FindArgs, Page } from "./archive.ts";
+import { compact } from "./compact.ts";
 import type { Summaries } from "./summary.ts";
 
 // Intent: a quiet archive reader. Recent records first, native Pi typography and keys;
@@ -245,7 +246,7 @@ export function registerCommands(
 ): void {
   pi.registerCommand("runs", {
     description:
-      "浏览 Run 归档；search <关键词> / all / rID / rID/mID / summary rID / debug",
+      "浏览 Run 归档；search <关键词> / all / rID / rID/mID / summary rID / compact / debug",
     async handler(args, ctx) {
       try {
         const s = state(),
@@ -267,6 +268,32 @@ export function registerCommands(
               null,
               2,
             ),
+          );
+          return;
+        }
+        if (input === "compact") {
+          // Messages written before compression, and the media still inline in
+          // them, are rewritten here rather than during a session's startup.
+          const pending = Number(
+            s.archive.store.db
+              .prepare(
+                "SELECT count(*) AS n FROM messages WHERE dict_id IS NULL",
+              )
+              .get()?.n ?? 0,
+          );
+          if (!pending) {
+            ctx.ui.notify("归档已是压缩形态，无需整理。", "info");
+            return;
+          }
+          ctx.ui.notify(
+            `开始整理 ${pending} 条历史消息，期间请勿关闭。`,
+            "info",
+          );
+          const result = compact(s.archive.store);
+          const mb = (n: number) => (n / 1048576).toFixed(0);
+          ctx.ui.notify(
+            `整理完成：${result.done} 条消息，正文 ${mb(result.bytesBefore)} MB 压缩为 ${mb(result.bytesAfter)} MB，图片已移至 ${s.archive.store.blobs.dir}。`,
+            "info",
           );
           return;
         }

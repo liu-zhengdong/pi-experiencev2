@@ -11,6 +11,7 @@ import {
 import { integer, runFromRow, text } from "./data.ts";
 import { parseQuery, queryHitIndex, queryMatches, querySql } from "./query.ts";
 import type { RunStore } from "./store.ts";
+import { NO_MATCH, NO_MESSAGES, overviewLine, PAGE_MISSED } from "./wording.ts";
 
 export type FindArgs = {
   query?: string;
@@ -35,7 +36,7 @@ export type Page<T> = {
   choices: { id: string; label: string }[];
 };
 const SELECT =
-  "SELECT r.*, s.cwd FROM runs r JOIN sessions s ON s.id=r.session_id";
+  "SELECT r.*, s.cwd FROM runs r JOIN sessions s ON s.ref=r.session_ref";
 const OUTPUT_BYTES = 12_000;
 const digest = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -60,11 +61,20 @@ function run(row: Parameters<typeof runFromRow>[0]): Run {
   return { ...runFromRow(row), cwd: text(row, "cwd") };
 }
 function header(r: Run): string {
-  return `r${r.ordinal}\n${r.startedAt}${r.endedAt ? ` → ${r.endedAt}` : ""}\n${r.cwd}\n${r.overview ?? `摘要未生成 · ${preview(r.goal || "无用户文本", 200)}`}`;
+  return `r${r.ordinal}\n${r.startedAt}${r.endedAt ? ` → ${r.endedAt}` : ""}\n${r.cwd}\n${overviewLine(r.overview, r.goal)}`;
 }
 
 function displayHeading(r: Run): string {
   return `r${r.ordinal} · ${r.startedAt.slice(0, 19).replace("T", " ")} UTC`;
+}
+
+/** One page of a body, cut to the output budget without splitting a character. */
+function page(body: string, at: number): { part: string; end: number } {
+  let end = Math.min(body.length, at + OUTPUT_BYTES);
+  while (Buffer.byteLength(body.slice(at, end)) > OUTPUT_BYTES)
+    end = at + Math.floor((end - at) * 0.8);
+  if (end < body.length && /[\uD800-\uDBFF]/u.test(body[end - 1] ?? "")) end--;
+  return { part: body.slice(at, end), end };
 }
 
 type ArchivedMessage = { role: string; [key: string]: unknown };
@@ -88,9 +98,27 @@ function parseMessage(payload: string, ref: string): ArchivedMessage {
 export class Archive {
   readonly store: RunStore;
   private readonly key = randomBytes(32);
-  private projection: { id: string; body: string } | undefined;
+  private projection: { id: string; format: string; body: string } | undefined;
   constructor(store: RunStore) {
     this.store = store;
+  }
+
+  /** Stored payloads are compressed; every read goes through the store's codec. */
+  private message(row: Record<string, SQLOutputValue>, ref: string) {
+    return parseMessage(this.text(row.payload, row.dict_id, ref), ref);
+  }
+
+  /** Decoding failures are reported like malformed JSON: named, and pointing at
+   *  the raw bytes, rather than surfacing a compression library's message. */
+  private text(payload: unknown, dictId: unknown, ref: string): string {
+    try {
+      return this.store.payloadText(payload, dictId);
+    } catch (cause) {
+      throw new Error(
+        `Invalid archived message ${ref}; raw mode can read the stored bytes`,
+        { cause },
+      );
+    }
   }
 
   private token(data: unknown): string {
@@ -239,16 +267,16 @@ export class Archive {
       if (!summaryHit && scope !== "summary") {
         const messages = this.store.db
           .prepare(
-            "SELECT first_seq,payload FROM messages WHERE run_id=? ORDER BY first_seq",
+            "SELECT first_seq,payload,dict_id FROM messages WHERE run_ref=? ORDER BY first_seq",
           )
-          .iterate(r.id);
+          .iterate(r.ordinal);
         let position = 0;
         for (const message of messages) {
           position++;
           const ref = `r${r.ordinal}/m${position}`;
-          const body = textBodies(
-            parseMessage(text(message, "payload"), ref),
-          ).find((body) => queryMatches(body, parsed));
+          const body = textBodies(this.message(message, ref)).find((body) =>
+            queryMatches(body, parsed),
+          );
           if (body !== undefined) {
             const index = queryHitIndex(body, parsed);
             match = `\n命中 ${ref} · ${preview(body.slice(Math.max(0, index - 80)).replaceAll("\n", " "), 240)}\nget_message_detail({"id":"${ref}"})`;
@@ -271,8 +299,7 @@ export class Archive {
         displayParts.push(
           [
             displayHeading(r),
-            r.overview ??
-              `摘要未生成 · ${preview(r.goal || "无用户文本", 200)}`,
+            overviewLine(r.overview, r.goal),
             args.cwd === undefined ? r.cwd : "",
             match ? match.slice(0, match.lastIndexOf("\n")) : "",
           ]
@@ -296,11 +323,7 @@ export class Archive {
     const textResult = [
       "Run 归档 · 历史证据，不代表当前状态",
       ...parts,
-      parts.length
-        ? ""
-        : more
-          ? "本页未命中，尚有历史未搜索。"
-          : "没有匹配的 Run。",
+      parts.length ? "" : more ? PAGE_MISSED : NO_MATCH,
       next ? `继续：find_run(${JSON.stringify(next)})` : "[已读完]",
     ]
       .filter(Boolean)
@@ -308,9 +331,9 @@ export class Archive {
     const displayText = displayParts.length
       ? displayParts.join("\n\n")
       : more
-        ? "本页未命中。N 继续搜索剩余历史。"
+        ? `${PAGE_MISSED}N 继续搜索剩余历史。`
         : parsed.clauses.length
-          ? `没有匹配的 Run。S 换关键词${args.cwd === undefined ? "。" : "，或 A 扩大到全库。"}`
+          ? `${NO_MATCH}S 换关键词${args.cwd === undefined ? "。" : "，或 A 扩大到全库。"}`
           : `当前范围还没有 Run。开始对话后会自动记录${args.cwd === undefined ? "。" : "；A 查看全库。"}`;
     return {
       text: textResult,
@@ -331,21 +354,21 @@ export class Archive {
       Number(
         this.store.db
           .prepare(
-            "SELECT coalesce(max(first_seq),0) AS n FROM messages WHERE run_id=?",
+            "SELECT coalesce(max(first_seq),0) AS n FROM messages WHERE run_ref=?",
           )
-          .get(r.id)?.n,
+          .get(r.ordinal)?.n,
       );
     const rows = this.store.db
       .prepare(
-        "SELECT id, first_seq, role, payload FROM messages WHERE run_id=? AND first_seq>? AND first_seq<=? ORDER BY first_seq LIMIT ?",
+        "SELECT id, first_seq, role, payload, dict_id FROM messages WHERE run_ref=? AND first_seq>? AND first_seq<=? ORDER BY first_seq LIMIT ?",
       )
-      .all(r.id, cursor?.at ?? 0, ceiling, limit + 1);
+      .all(r.ordinal, cursor?.at ?? 0, ceiling, limit + 1);
     const startPosition = Number(
       this.store.db
         .prepare(
-          "SELECT count(*) AS n FROM messages WHERE run_id=? AND first_seq<=?",
+          "SELECT count(*) AS n FROM messages WHERE run_ref=? AND first_seq<=?",
         )
-        .get(r.id, cursor?.at ?? 0)?.n,
+        .get(r.ordinal, cursor?.at ?? 0)?.n,
     );
     const parts: string[] = [],
       displayParts: string[] = [];
@@ -356,10 +379,7 @@ export class Archive {
     for (const row of rows.slice(0, limit)) {
       position++;
       const ref = `r${r.ordinal}/m${position}`;
-      const snippet = preview(
-        messagePreview(parseMessage(text(row, "payload"), ref)),
-        1600,
-      );
+      const snippet = preview(messagePreview(this.message(row, ref)), 1600);
       const display = `[${ref}] ${text(row, "role")}\n${snippet}`;
       const body = `${display}\nget_message_detail({"id":"${ref}"})`;
       if (parts.length && bytes + Buffer.byteLength(body) > OUTPUT_BYTES) break;
@@ -381,7 +401,7 @@ export class Archive {
       ...(next ? { next } : {}),
       displayText: [
         displayHeading(r),
-        r.overview ?? "摘要未生成",
+        overviewLine(r.overview, r.goal),
         "消息预览 · O 读取完整详情",
         ...displayParts,
       ].join("\n\n"),
@@ -389,7 +409,7 @@ export class Archive {
         header(r),
         "执行过程 · 预览，完整内容按消息 ID 展开",
         ...parts,
-        parts.length ? "" : "尚无已落库消息。",
+        parts.length ? "" : NO_MESSAGES,
         next ? `继续：find_run(${JSON.stringify(next)})` : "[已读完]",
       ]
         .filter(Boolean)
@@ -406,14 +426,14 @@ export class Archive {
     if (composite) {
       // Run-scoped refs are derived from first_seq order; no stored ordinal.
       const runRow = this.store.db
-        .prepare("SELECT id FROM runs WHERE ordinal=?")
+        .prepare("SELECT ordinal FROM runs WHERE ordinal=?")
         .get(Number(composite[1]));
       row = runRow
         ? this.store.db
             .prepare(
-              "SELECT id,role FROM messages WHERE run_id=? ORDER BY first_seq LIMIT 1 OFFSET ?",
+              "SELECT id,role FROM messages WHERE run_ref=? ORDER BY first_seq LIMIT 1 OFFSET ?",
             )
-            .get(text(runRow, "id"), Number(composite[2]) - 1)
+            .get(integer(runRow, "ordinal"), Number(composite[2]) - 1)
         : undefined;
     } else {
       // Legacy global m-numbers and message UUIDs keep old citations readable.
@@ -426,55 +446,49 @@ export class Archive {
     }
     if (!row)
       throw new Error(`Message not found (or its Run was deleted): ${args.id}`);
-    // Terminal messages are immutable. Validate existence even when the text projection is cached.
+    // Terminal messages are immutable. Validate existence even when the projection is cached.
     const messageId = text(row, "id");
     const query = { id: messageId, format };
     const cursor = this.cursor(args.cursor, query);
     const at = cursor?.at ?? 0;
-    let part: string, end: number, length: number;
-    if (format === "raw") {
-      // Byte ranges avoid re-parsing, hashing and transferring the entire JSON on every page.
-      const chunk = this.store.db
-        .prepare(
-          "SELECT substr(CAST(payload AS BLOB),?,?) AS chunk, length(CAST(payload AS BLOB)) AS size FROM messages WHERE id=?",
-        )
-        .get(at + 1, OUTPUT_BYTES + 4, row.id ?? null);
-      const bytes = chunk?.chunk;
-      if (!(bytes instanceof Uint8Array))
-        throw new Error("Cannot read message bytes");
-      length = Number(chunk?.size);
-      let take = Math.min(OUTPUT_BYTES, bytes.length);
-      while (
-        take > 0 &&
-        take < bytes.length &&
-        ((bytes[take] ?? 0) & 0xc0) === 0x80
-      )
-        take--;
-      part = Buffer.from(bytes.subarray(0, take)).toString("utf8");
-      end = at + take;
-    } else {
-      if (this.projection?.id !== messageId) {
-        const payload = this.store.db
-          .prepare("SELECT payload FROM messages WHERE id=?")
-          .get(row.id ?? null);
-        const body = messageText(
-          parseMessage(text(payload ?? {}, "payload"), args.id),
-        );
-        if (Buffer.byteLength(body) > 8 * 1024 * 1024)
+    // A compressed payload has no meaningful byte range, so raw and text both
+    // page over a decoded string and share one boundary rule.
+    if (
+      this.projection?.id !== messageId ||
+      this.projection.format !== format
+    ) {
+      const stored = this.store.db
+        .prepare("SELECT payload, dict_id FROM messages WHERE id=?")
+        .get(row.id ?? null);
+      // Raw mode must still work when decoding fails, so it falls back to the
+      // stored bytes: unreadable content is exactly what it exists to show.
+      let json: string;
+      try {
+        json = this.store.payloadText(stored?.payload, stored?.dict_id);
+      } catch (cause) {
+        if (format !== "raw")
           throw new Error(
-            `Text projection exceeds 8 MiB; use get_message_detail(${JSON.stringify({ id: args.id, format: "raw" })})`,
+            `Invalid archived message ${args.id}; raw mode can read the stored bytes`,
+            { cause },
           );
-        this.projection = { id: text(row, "id"), body };
+        const bytes = stored?.payload;
+        json =
+          bytes instanceof Uint8Array
+            ? Buffer.from(bytes).toString("utf8")
+            : String(bytes ?? "");
       }
-      const body = this.projection.body;
-      length = body.length;
-      end = Math.min(length, at + OUTPUT_BYTES);
-      while (Buffer.byteLength(body.slice(at, end)) > OUTPUT_BYTES)
-        end = at + Math.floor((end - at) * 0.8);
-      if (end < length && /[\uD800-\uDBFF]/u.test(body[end - 1] ?? "")) end--;
-      part = body.slice(at, end);
+      const body =
+        format === "raw" ? json : messageText(parseMessage(json, args.id));
+      if (Buffer.byteLength(body) > 8 * 1024 * 1024)
+        throw new Error(
+          `Message projection exceeds 8 MiB: ${JSON.stringify({ id: args.id })}`,
+        );
+      this.projection = { id: messageId, format, body };
     }
+    const body = this.projection.body;
+    const length = body.length;
     if (at > length) throw new Error("Invalid message cursor");
+    const { part, end } = page(body, at);
     const next =
       end < length
         ? { ...args, cursor: this.continuation(query, end, length) }
@@ -522,17 +536,19 @@ export class Archive {
         if (r.recording) throw new Error(`Active Run cannot be deleted: ${id}`);
         targets.set(r.id, r);
       }
-      const messageDelete = db.prepare("DELETE FROM messages WHERE run_id=?");
-      const eventDelete = db.prepare("DELETE FROM events WHERE run_id=?");
-      const runDelete = db.prepare("DELETE FROM runs WHERE id=?");
+      const messageDelete = db.prepare("DELETE FROM messages WHERE run_ref=?");
+      const eventDelete = db.prepare("DELETE FROM events WHERE run_ref=?");
+      const runDelete = db.prepare("DELETE FROM runs WHERE ordinal=?");
       const tombstone = db.prepare("INSERT INTO deleted_runs VALUES (?,?,?,?)");
       for (const r of targets.values()) {
-        messageDelete.run(r.id);
-        eventDelete.run(r.id);
-        runDelete.run(r.id);
+        messageDelete.run(r.ordinal);
+        eventDelete.run(r.ordinal);
+        runDelete.run(r.ordinal);
         tombstone.run(r.ordinal, r.id, new Date().toISOString(), reason.trim());
       }
       db.exec("COMMIT");
+      // Deleting rows only frees pages inside the file; hand them back to disk.
+      this.store.reclaim();
       return {
         deleted: [...targets.values()].map((r) => `r${r.ordinal}`),
         alreadyDeleted,

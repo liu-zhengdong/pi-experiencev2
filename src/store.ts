@@ -1,8 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import { closeSync, mkdirSync, openSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { BlobStore, externalize } from "./blobs.ts";
+import {
+  type Dictionaries,
+  decodeRow,
+  encode,
+  openDictionaries,
+  refreshDictionary,
+} from "./codec.ts";
 import { textBodies } from "./content.ts";
 import {
   type Binding,
@@ -15,6 +23,9 @@ import {
   text,
 } from "./data.ts";
 import { initialize, validateDatabase } from "./schema.ts";
+
+/** Messages written between two checks for whether a new dictionary is due. */
+const DICTIONARY_CHECK_INTERVAL = 500;
 
 function processAlive(pid: number): boolean {
   try {
@@ -33,6 +44,10 @@ function processAlive(pid: number): boolean {
 export class RunStore {
   readonly db: DatabaseSync;
   readonly path: string;
+  readonly blobs: BlobStore;
+  dictionaries: Dictionaries;
+  private writeDictionary: { id: number; bytes: Buffer } | undefined;
+  private sinceDictionaryCheck = 0;
   private closed = false;
 
   constructor(path: string) {
@@ -62,6 +77,23 @@ export class RunStore {
       this.db.close();
       throw error;
     }
+    this.blobs = new BlobStore(
+      path === ":memory:" ? join(process.cwd(), ".run-blobs") : `${path}-blobs`,
+    );
+    this.dictionaries = openDictionaries(this.db);
+    this.writeDictionary = this.dictionaries.current;
+  }
+
+  /** Reclaims the pages a Run deletion released. Incremental so a large archive
+   *  is not rewritten in full on the way out of a delete. */
+  reclaim(): void {
+    this.db.exec("PRAGMA incremental_vacuum;");
+  }
+
+  /** Picks up a dictionary written by another path, such as a compaction pass. */
+  reloadDictionaries(): void {
+    this.dictionaries = openDictionaries(this.db);
+    this.writeDictionary = this.dictionaries.current;
   }
 
   private transaction<T>(fn: () => T): T {
@@ -91,36 +123,39 @@ export class RunStore {
         .prepare("SELECT * FROM writers WHERE host=?")
         .all(hostname())) {
         if (processAlive(integer(writer, "pid"))) continue;
-        const sessionId = text(writer, "session_id");
+        const sessionRef = integer(writer, "session_ref");
         this.recoverRunning(
-          { sessionId, branchId: "", token: text(writer, "token") },
+          { sessionRef, branchRef: 0, token: text(writer, "token") },
           "writer_disappeared",
           at,
         );
         this.db
-          .prepare("DELETE FROM writers WHERE session_id=?")
-          .run(sessionId);
+          .prepare("DELETE FROM writers WHERE session_ref=?")
+          .run(sessionRef);
       }
       const existing = this.db
-        .prepare("SELECT id FROM sessions WHERE pi_session_id = ? AND cwd = ?")
+        .prepare("SELECT ref FROM sessions WHERE pi_session_id = ? AND cwd = ?")
         .get(source.piSessionId, source.cwd);
-      const sessionId = existing ? text(existing, "id") : randomUUID();
-      if (!existing) {
-        this.db
-          .prepare("INSERT INTO sessions VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .run(
-            sessionId,
-            source.piSessionId,
-            source.cwd,
-            source.title,
-            source.agentId,
-            at,
-            at,
+      const sessionRef = existing
+        ? integer(existing, "ref")
+        : Number(
+            this.db
+              .prepare(
+                "INSERT INTO sessions (id, pi_session_id, cwd, title, agent_id, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) RETURNING ref",
+              )
+              .get(
+                randomUUID(),
+                source.piSessionId,
+                source.cwd,
+                source.title,
+                source.agentId,
+                at,
+                at,
+              )?.ref,
           );
-      }
       const writer = this.db
-        .prepare("SELECT * FROM writers WHERE session_id = ?")
-        .get(sessionId);
+        .prepare("SELECT * FROM writers WHERE session_ref = ?")
+        .get(sessionRef);
       if (
         writer &&
         (text(writer, "host") !== hostname() ||
@@ -131,28 +166,31 @@ export class RunStore {
         );
       }
       this.db
-        .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
-        .run(source.title, at, sessionId);
+        .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE ref = ?")
+        .run(source.title, at, sessionRef);
       const branch = this.db
         .prepare(
-          "SELECT id FROM branches WHERE session_id = ? ORDER BY rowid DESC LIMIT 1",
+          "SELECT ref FROM branches WHERE session_ref = ? ORDER BY ref DESC LIMIT 1",
         )
-        .get(sessionId);
-      const branchId = branch ? text(branch, "id") : randomUUID();
-      if (!branch) {
-        this.db
-          .prepare("INSERT INTO branches VALUES (?, ?, NULL, NULL, ?, ?)")
-          .run(
-            branchId,
-            sessionId,
-            source.reason === "fork" ? "fork_origin_unknown" : "root",
-            at,
+        .get(sessionRef);
+      const branchRef = branch
+        ? integer(branch, "ref")
+        : Number(
+            this.db
+              .prepare(
+                "INSERT INTO branches (id, session_ref, previous_branch_ref, source_target_hint, reason, created_at) VALUES (?, ?, NULL, NULL, ?, ?) RETURNING ref",
+              )
+              .get(
+                randomUUID(),
+                sessionRef,
+                source.reason === "fork" ? "fork_origin_unknown" : "root",
+                at,
+              )?.ref,
           );
-      }
-      const binding = { sessionId, branchId, token: randomUUID() };
+      const binding = { sessionRef, branchRef, token: randomUUID() };
       this.db
         .prepare("INSERT OR REPLACE INTO writers VALUES (?, ?, ?, ?)")
-        .run(sessionId, binding.token, hostname(), process.pid);
+        .run(sessionRef, binding.token, hostname(), process.pid);
       this.recoverRunning(binding, "writer_disappeared", at);
       return binding;
     });
@@ -160,96 +198,103 @@ export class RunStore {
 
   private assertWriter(binding: Binding): void {
     const writer = this.db
-      .prepare("SELECT token FROM writers WHERE session_id = ?")
-      .get(binding.sessionId);
+      .prepare("SELECT token FROM writers WHERE session_ref = ?")
+      .get(binding.sessionRef);
     if (!writer || text(writer, "token") !== binding.token)
       throw new Error("Run archive writer ownership lost");
   }
 
-  startRun(binding: Binding, agentId: string, at: string): string {
+  startRun(binding: Binding, agentId: string, at: string): number {
     return this.transaction(() => {
       this.assertWriter(binding);
       const existing = this.db
         .prepare(
-          "SELECT id FROM runs WHERE session_id = ? AND status = 'running'",
+          "SELECT ordinal FROM runs WHERE session_ref = ? AND status = 'running'",
         )
-        .get(binding.sessionId);
-      if (existing) return text(existing, "id");
+        .get(binding.sessionRef);
+      if (existing) return integer(existing, "ordinal");
       const next = this.db
         .prepare(
-          "SELECT COALESCE(MAX(number), 0) + 1 AS number FROM runs WHERE session_id = ?",
+          "SELECT COALESCE(MAX(number), 0) + 1 AS number FROM runs WHERE session_ref = ?",
         )
-        .get(binding.sessionId);
+        .get(binding.sessionRef);
       if (!next) throw new Error("Cannot allocate Run number");
-      const id = randomUUID();
-      this.db
+      const inserted = this.db
         .prepare(
-          "INSERT INTO runs (id, session_id, branch_id, number, agent_id, status, started_at, ended_at, updated_at, reason) VALUES (?, ?, ?, ?, ?, 'running', ?, NULL, ?, NULL)",
+          "INSERT INTO runs (id, session_ref, branch_ref, number, agent_id, status, started_at, ended_at, updated_at, reason) VALUES (?, ?, ?, ?, ?, 'running', ?, NULL, ?, NULL) RETURNING ordinal",
         )
-        .run(
-          id,
-          binding.sessionId,
-          binding.branchId,
+        .get(
+          randomUUID(),
+          binding.sessionRef,
+          binding.branchRef,
           integer(next, "number"),
           agentId,
           at,
           at,
         );
-      return id;
+      return Number(inserted?.ordinal);
     });
   }
 
   append(
     binding: Binding,
-    runId: string | null,
+    runRef: number | null,
     event: CapturedEvent,
     finish = false,
   ): void {
     this.transaction(() => {
       this.assertWriter(binding);
-      const inserted = this.insertEvent(binding, runId, event);
+      const inserted = this.insertEvent(binding, runRef, event);
       if (!inserted) return;
-      if (finish && runId) this.finishRun(runId, event.at, event.at);
+      if (finish && runRef) this.finishRun(runRef, event.at, event.at);
     });
   }
 
   private insertEvent(
     binding: Binding,
-    runId: string | null,
+    runRef: number | null,
     event: CapturedEvent,
   ): boolean {
     // A message body is stored exactly once, in messages. The event is its marker.
     const payload = json(event.message ? { type: event.kind } : event.payload);
+    // Eight bytes of digest distinguish a genuine replay from a reused id across
+    // an archive of this size; it guards consistency, not a trust boundary.
     const fingerprint = createHash("sha256")
-      .update(json([binding.sessionId, binding.branchId, runId, event]))
-      .digest("hex");
+      .update(json([binding.sessionRef, binding.branchRef, runRef, event]))
+      .digest()
+      .subarray(0, 8);
     const previous = this.db
-      .prepare("SELECT * FROM events WHERE id = ?")
+      .prepare("SELECT fingerprint FROM events WHERE id = ?")
       .get(event.id);
     if (previous) {
-      if (text(previous, "fingerprint") !== fingerprint) {
+      const stored = previous.fingerprint;
+      if (
+        !(stored instanceof Uint8Array) ||
+        !fingerprint.equals(Buffer.from(stored))
+      )
         throw new Error("Event ID reused with different content");
-      }
       return false;
     }
-    if (runId) {
+    if (runRef) {
       const run = this.db
-        .prepare("SELECT status FROM runs WHERE id = ? AND session_id = ?")
-        .get(runId, binding.sessionId);
+        .prepare(
+          "SELECT status FROM runs WHERE ordinal = ? AND session_ref = ?",
+        )
+        .get(runRef, binding.sessionRef);
       if (!run || text(run, "status") !== "running")
         throw new Error("Cannot append to a closed or foreign Run");
     }
     const result = this.db
       .prepare(
-        "INSERT INTO events (id, session_id, run_id, branch_id, kind, captured_at, message_id, payload, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (id, session_ref, run_ref, branch_ref, kind, captured_at, message_id, payload, fingerprint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         event.id,
-        binding.sessionId,
-        runId,
-        binding.branchId,
+        binding.sessionRef,
+        runRef,
+        binding.branchRef,
         event.kind,
-        event.at,
+        Date.parse(event.at),
         event.message?.id ?? null,
         payload,
         fingerprint,
@@ -258,51 +303,70 @@ export class RunStore {
       const message = event.message;
       if (this.db.prepare("SELECT 1 FROM messages WHERE id=?").get(message.id))
         throw new Error("Cannot change a terminal or foreign message");
+      // Encoded media leaves the row before anything measures or compresses it.
+      const body = externalize(message.payload, this.blobs);
+      const { blob, dictId } = encode(json(body), this.writeDictionary);
       this.db
-        .prepare("INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .prepare(
+          "INSERT INTO messages (id, session_ref, run_ref, branch_ref, role, first_seq, payload, dict_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
         .run(
           message.id,
-          binding.sessionId,
-          runId,
-          binding.branchId,
+          binding.sessionRef,
+          runRef,
+          binding.branchRef,
           message.role,
           result.lastInsertRowid,
-          json(message.payload),
+          blob,
+          dictId,
         );
-      if (runId && message.role === "user") {
-        const goal = textBodies(message.payload).join("\n").slice(0, 512);
+      if (runRef && message.role === "user") {
+        const goal = textBodies(body).join("\n").slice(0, 512);
         this.db
-          .prepare("UPDATE runs SET goal = ? WHERE id = ? AND goal = ''")
-          .run(goal, runId);
+          .prepare("UPDATE runs SET goal = ? WHERE ordinal = ? AND goal = ''")
+          .run(goal, runRef);
+      }
+      // Counting rows is a scan, so the growth check rides a local counter and
+      // only reaches the database on the cadence a rebuild could matter at.
+      if (++this.sinceDictionaryCheck >= DICTIONARY_CHECK_INTERVAL) {
+        this.sinceDictionaryCheck = 0;
+        const refreshed = refreshDictionary(
+          this.db,
+          this.dictionaries,
+          event.at,
+        );
+        if (refreshed?.id !== this.writeDictionary?.id) {
+          this.writeDictionary = refreshed;
+          this.dictionaries = openDictionaries(this.db);
+        }
       }
     }
     this.db
-      .prepare("UPDATE sessions SET updated_at = ? WHERE id = ?")
-      .run(event.at, binding.sessionId);
+      .prepare("UPDATE sessions SET updated_at = ? WHERE ref = ?")
+      .run(event.at, binding.sessionRef);
     return true;
   }
 
-  private finishRun(runId: string, endedAt: string | null, at: string): void {
-    // Keep the existing on-disk encoding: 'completed' only means recording stopped.
-    // No migration or history rewrite is needed.
+  private finishRun(runRef: number, endedAt: string | null, at: string): void {
+    // 'completed' only means recording stopped, not that the work succeeded.
     this.db
       .prepare(
-        "UPDATE runs SET status = 'completed', ended_at = ?, updated_at = ?, reason = NULL WHERE id = ? AND status = 'running'",
+        "UPDATE runs SET status = 'completed', ended_at = ?, updated_at = ?, reason = NULL WHERE ordinal = ? AND status = 'running'",
       )
-      .run(endedAt, at, runId);
+      .run(endedAt, at, runRef);
   }
 
   private recoverRunning(binding: Binding, reason: string, at: string): void {
     const active = this.db
       .prepare(
-        "SELECT id, branch_id FROM runs WHERE session_id = ? AND status = 'running'",
+        "SELECT ordinal, branch_ref FROM runs WHERE session_ref = ? AND status = 'running'",
       )
-      .get(binding.sessionId);
+      .get(binding.sessionRef);
     if (active) {
-      const id = text(active, "id");
+      const ordinal = integer(active, "ordinal");
       this.insertEvent(
-        { ...binding, branchId: text(active, "branch_id") },
-        id,
+        { ...binding, branchRef: integer(active, "branch_ref") },
+        ordinal,
         {
           id: randomUUID(),
           kind: "archive.recording_stopped",
@@ -311,7 +375,7 @@ export class RunStore {
         },
       );
       // We observed recording stop, not the original execution's end time.
-      this.finishRun(id, null, at);
+      this.finishRun(ordinal, null, at);
     }
   }
 
@@ -327,18 +391,18 @@ export class RunStore {
         "branch_changed_before_settlement",
         event.at,
       );
-      const next = { ...binding, branchId: randomUUID() };
-      this.db
+      const created = this.db
         .prepare(
-          "INSERT INTO branches VALUES (?, ?, ?, ?, 'tree_navigation', ?)",
+          "INSERT INTO branches (id, session_ref, previous_branch_ref, source_target_hint, reason, created_at) VALUES (?, ?, ?, ?, 'tree_navigation', ?) RETURNING ref",
         )
-        .run(
-          next.branchId,
-          binding.sessionId,
-          binding.branchId,
+        .get(
+          randomUUID(),
+          binding.sessionRef,
+          binding.branchRef,
           targetHint,
           event.at,
         );
+      const next = { ...binding, branchRef: Number(created?.ref) };
       this.insertEvent(next, null, event);
       return next;
     });
@@ -348,8 +412,8 @@ export class RunStore {
     this.transaction(() => {
       this.assertWriter(binding);
       this.db
-        .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE id = ?")
-        .run(name, new Date().toISOString(), binding.sessionId);
+        .prepare("UPDATE sessions SET title = ?, updated_at = ? WHERE ref = ?")
+        .run(name, new Date().toISOString(), binding.sessionRef);
     });
   }
 
@@ -358,63 +422,68 @@ export class RunStore {
       this.assertWriter(binding);
       this.recoverRunning(binding, reason, new Date().toISOString());
       this.db
-        .prepare("DELETE FROM writers WHERE session_id = ? AND token = ?")
-        .run(binding.sessionId, binding.token);
+        .prepare("DELETE FROM writers WHERE session_ref = ? AND token = ?")
+        .run(binding.sessionRef, binding.token);
     });
   }
 
-  runs(sessionId: string, afterNumber = 0, limit = 50) {
+  /** Decodes a stored message payload into JSON text. */
+  payloadText(payload: unknown, dictId: unknown): string {
+    return decodeRow(payload, dictId, this.dictionaries);
+  }
+
+  runs(sessionRef: number, afterNumber = 0, limit = 50) {
     this.checkPage(afterNumber, limit);
     return this.db
       .prepare(
-        "SELECT * FROM runs WHERE session_id = ? AND number > ? ORDER BY number LIMIT ?",
+        "SELECT * FROM runs WHERE session_ref = ? AND number > ? ORDER BY number LIMIT ?",
       )
-      .all(sessionId, afterNumber, limit)
+      .all(sessionRef, afterNumber, limit)
       .map(runFromRow);
   }
 
-  run(sessionId: string, number: number) {
+  run(sessionRef: number, number: number) {
     if (!Number.isSafeInteger(number) || number < 1)
       throw new Error("Run number must be a positive safe integer");
     const row = this.db
-      .prepare("SELECT * FROM runs WHERE session_id = ? AND number = ?")
-      .get(sessionId, number);
+      .prepare("SELECT * FROM runs WHERE session_ref = ? AND number = ?")
+      .get(sessionRef, number);
     return row ? runFromRow(row) : null;
   }
 
-  events(sessionId: string, runId: string | null, after = 0, limit = 50) {
+  events(sessionRef: number, runRef: number | null, after = 0, limit = 50) {
     this.checkPage(after, limit);
     return this.db
       .prepare(
-        "SELECT * FROM events WHERE session_id = ? AND (? IS NULL OR run_id = ?) AND seq > ? ORDER BY seq LIMIT ?",
+        "SELECT * FROM events WHERE session_ref = ? AND (? IS NULL OR run_ref = ?) AND seq > ? ORDER BY seq LIMIT ?",
       )
-      .all(sessionId, runId, runId, after, limit)
+      .all(sessionRef, runRef, runRef, after, limit)
       .map((row) => ({
         sequence: integer(row, "seq"),
         id: text(row, "id"),
-        runId: nullableText(row, "run_id"),
-        branchId: text(row, "branch_id"),
+        runRef: row.run_ref === null ? null : integer(row, "run_ref"),
+        branchRef: integer(row, "branch_ref"),
         kind: text(row, "kind"),
-        capturedAt: text(row, "captured_at"),
+        capturedAt: new Date(integer(row, "captured_at")).toISOString(),
         messageId: nullableText(row, "message_id"),
         payload: parse(text(row, "payload")),
       }));
   }
 
-  messages(sessionId: string, runId: string | null, after = 0, limit = 50) {
+  messages(sessionRef: number, runRef: number | null, after = 0, limit = 50) {
     this.checkPage(after, limit);
     return this.db
       .prepare(
-        "SELECT * FROM messages WHERE session_id = ? AND (? IS NULL OR run_id = ?) AND first_seq > ? ORDER BY first_seq LIMIT ?",
+        "SELECT * FROM messages WHERE session_ref = ? AND (? IS NULL OR run_ref = ?) AND first_seq > ? ORDER BY first_seq LIMIT ?",
       )
-      .all(sessionId, runId, runId, after, limit)
+      .all(sessionRef, runRef, runRef, after, limit)
       .map((row) => ({
         id: text(row, "id"),
-        runId: nullableText(row, "run_id"),
-        branchId: text(row, "branch_id"),
+        runRef: row.run_ref === null ? null : integer(row, "run_ref"),
+        branchRef: integer(row, "branch_ref"),
         role: text(row, "role"),
         sequence: integer(row, "first_seq"),
-        payload: parse(text(row, "payload")),
+        payload: parse(this.payloadText(row.payload, row.dict_id)),
       }));
   }
 
