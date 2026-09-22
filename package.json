@@ -1,6 +1,6 @@
 {
   "name": "pi-experiencev2",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Run-only SQLite archive for pi, with on-demand search and message reading",
   "type": "module",
   "keywords": [
