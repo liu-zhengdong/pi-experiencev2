@@ -9,7 +9,6 @@
   "files": [
     "dist",
     "README.md",
-    "README-Evolution.md",
     "docs"
   ],
   "pi": {

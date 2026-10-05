@@ -55,7 +55,6 @@ pi --no-extensions -e ./src/index.ts
 - [命令、工具与运行边界](docs/usage.md)
 - [结构与职责](docs/design.md)，含 pi-note 的独立分工
 - [验证结果与尚未验证的部分](docs/verification.md)
-- [设计演进](README-Evolution.md)
 - [npm 发布与 OIDC 配置](docs/publishing.md)
 
 开发检查：`npm run check`。真实模型实验和规模基准的入口见验证记录；均使用隔离库。

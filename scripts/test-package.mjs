@@ -35,7 +35,7 @@ const files = execFileSync("tar", ["-tzf", tarball], { encoding: "utf8" })
 for (const file of files) {
   assert.match(
     file,
-    /^package\/(?:dist\/[^/]+\.(?:js|d\.ts)|dist\/web\/app\.js|web\/(?:index\.html|style\.css)|examples\/vault\/.+\.md|docs\/.+\.md|(?:README(?:-Evolution)?|DESIGN(?:-Evolution)?)\.md|package\.json)$/,
+    /^package\/(?:dist\/[^/]+\.(?:js|d\.ts)|dist\/web\/app\.js|web\/(?:index\.html|style\.css)|examples\/vault\/.+\.md|docs\/.+\.md|(?:README|DESIGN)\.md|package\.json)$/,
     `Unexpected package file: ${file}`,
   );
 }
